@@ -1,0 +1,23 @@
+# This YAML file contains the common commands that will be loaded and merged in
+# to every other Command Level that is defined. These are merged in at load
+# time.
+
+commands:
+  help:
+    desc_key: help.desc
+    run: help
+
+  # "?" is a shorthand alias for "help", hidden from tab completion
+  #     and from the "help" listing itself.
+  "?":
+    desc_key: help.desc
+    alias: help
+    hidden: true
+
+  exit:
+    desc_key: exit.desc
+    run: exit
+
+  end:
+    desc_key: end.desc
+    run: end

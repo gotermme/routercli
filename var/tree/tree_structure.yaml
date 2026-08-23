@@ -1,0 +1,56 @@
+# This YAML file defines every Command Level in this CLI's Tree Structure
+
+trees:
+  base:
+    tree_file: var/tree/level_base.yaml
+    is_base: true
+    # No parent, no enter_command. Every session starts here, and
+    # there is nowhere "before" it.
+
+  exec:
+    tree_file: var/tree/level_exec.yaml
+    parent: base
+    inherit_parent: true
+    enter_command: enable
+    exit_command: disable
+
+  diagnostic:
+    tree_file: var/tree/level_diagnostic.yaml
+    parent: exec
+    inherit_parent: false
+    enter_command: diagnostic-mode
+    exit_command: exit-diagnostic-mode
+
+  config:
+    tree_file: var/tree/level_config.yaml
+    parent: exec
+    inherit_parent: true
+    prompt_suffix: "(config)"
+    enter_command: configure.terminal
+    # No exit_command. This level is left through the generic "exit"
+    # and "end" commands (cmd/cmd_mode_control.go), not a dedicated
+    # named command.
+
+  config-if:
+    tree_file: var/tree/level_config_if.yaml
+    parent: config
+    inherit_parent: true
+    prompt_suffix: "(config-if)"
+    enter_command: interface
+    # No exit_command, same reasoning as config above. Also note that
+    # "interface <name>" takes an argument, the interface name itself,
+    # that cmd/cmd_interface.go stashes on the pushed
+    # ModeFrame.Context. This manifest deliberately knows nothing
+    # about that, only the bare command name.
+
+  user:
+    tree_file: var/tree/level_user.yaml
+    parent: base
+    inherit_parent: false
+    prompt_suffix: "(user)"
+    enter_command: user
+    # No exit_command, same reasoning as config above. Reached
+    # directly from base, not from exec, since managing one's own
+    # account, multi-factor enrollment and a password change alike,
+    # only requires being logged in, see cmd/cmd_user.go, not the
+    # separate, unrelated privilege step "enable" gates.

@@ -1,0 +1,49 @@
+# This YAML file contains the commands for the "configure terminal" Command
+# Level.
+
+commands:
+  hostname:
+    desc_key: hostname.desc
+    minargs: 1
+    maxargs: 1
+    maxarglength: 64
+    # "no hostname" resets to the default name. See cmd/cmd_hostname.go.
+    negatable: true
+    run: hostname
+
+  interface:
+    desc_key: interface.desc
+    minargs: 1
+    maxargs: 1
+    maxarglength: 32
+    # Pushes config-if mode (see cmd/cmd_interface.go), scoped to
+    # whichever interface name was given.
+    run: interface
+
+  password:
+    desc_key: password.desc
+    subcommands:
+      manager:
+        desc_key: password.manager.desc
+        # "password manager" prompts for the new secret, masked, not
+        # typed as a same-line argument. See cmd_password_manager.go
+        # for why. "no password manager" clears it, also with no
+        # argument needed.
+        negatable: true
+        run: password-manager
+
+  terminal:
+    desc_key: terminal.desc
+    subcommands:
+      length:
+        desc_key: terminal.length.desc
+        minargs: 1
+        maxargs: 1
+        arghelp_key: terminal.length.arghelp
+        run: terminal.length
+      width:
+        desc_key: terminal.width.desc
+        minargs: 1
+        maxargs: 1
+        arghelp_key: terminal.width.arghelp
+        run: terminal.width

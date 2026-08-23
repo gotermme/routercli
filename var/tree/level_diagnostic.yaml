@@ -1,0 +1,11 @@
+# This YAML file contains the commands for the "diagnostic" Command
+# Level, reached from the "exec" level with "diagnostic-mode".
+
+commands:
+  self-test:
+    desc_key: self_test.desc
+    run: diagnostic.self-test
+
+  exit-diagnostic-mode:
+    desc_key: exit_diagnostic_mode.desc
+    run: exit-diagnostic-mode

@@ -1,0 +1,54 @@
+# This YAML file contains the commands for the "exec" Command Level,
+# reached from the "base" level with "enable".
+
+commands:
+  disable:
+    desc_key: disable.desc
+    run: disable
+
+  diagnostic-mode:
+    desc_key: diagnostic_mode.desc
+    run: diagnostic-mode
+
+  configure:
+    desc_key: configure.desc
+    help_key: configure.help
+    subcommands:
+      terminal:
+        desc_key: configure.terminal.desc
+        run: configure.terminal
+
+  set:
+    desc_key: set.desc
+    subcommands:
+      description:
+        desc_key: set.description.desc
+        minargs: 1
+        maxargs: 1
+        maxarglength: 256
+        run: set.description
+
+  audit-log:
+    desc_key: audit_log.desc
+    subcommands:
+      enable:
+        desc_key: audit_log.enable.desc
+        run: audit-log.enable
+      disable:
+        desc_key: audit_log.disable.desc
+        run: audit-log.disable
+      status:
+        desc_key: audit_log.status.desc
+        run: audit-log.status
+
+  language:
+    desc_key: language.desc
+    subcommands:
+      list:
+        desc_key: language.list.desc
+        run: language.list
+      set:
+        desc_key: language.set.desc
+        minargs: 1
+        maxargs: 1
+        run: language.set

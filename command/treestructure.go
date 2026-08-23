@@ -1,0 +1,328 @@
+// Copyright 2026 Bret Jordan, All rights reserved.
+//
+// Use of this source code is governed by an Apache 2.0 license
+// that can be found in the LICENSE file in the root of the source tree.
+
+package command
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/gotermme/routercli/auth"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ----------------------------------------------------------------------
+// Public Methods - Tree Structure
+// ----------------------------------------------------------------------
+
+// Base - This method returns the one level with IsBase set. Every
+// Session starts here, see Session.CommandLevel in package auth, and
+// it seeds the root CommandLevelStack frame in main.go. This panics if called
+// before a successful LoadTreeStructure, or on a zero value
+// TreeStructure, since that is a programming error, LoadTreeStructure
+// guarantees exactly one base level exists on any successful return,
+// not a runtime condition.
+func (t *TreeStructure) Base() *CommandLevel {
+	for _, e := range t.Order {
+		if e.IsBase {
+			return e
+		}
+	}
+	panic("command: TreeStructure has no base level, this should have been caught by LoadTreeStructure validation")
+}
+
+// ----------------------------------------------------------------------
+// Public Functions - Tree Structure
+// ----------------------------------------------------------------------
+
+// LoadTreeStructure - This function reads and validates a manifest
+// like var/tree/tree_structure.yaml, resolves each Command Level's
+// effective command tree, its own tree, optionally merged with its
+// full parent chain per InheritParent, then merged with the common
+// tree exactly once unless SkipCommonMerge, and returns the assembled
+// TreeStructure. It covers every Command Level in the project the
+// same way, there is no separate handling here for a privilege level
+// versus a plain mode.
+//
+// This validates only what loading inherently requires. It does not
+// check that every level's declared EnterCommand and ExitCommand is
+// actually registered by some cmd/cmd_*.go file, that is
+// VerifyCommandLevels's job, see its own doc comment for why that
+// check lives separately. A "run:" reference inside each level's own
+// tree file is validated here, transitively, through LoadTree, but
+// those are ordinary command references, resolved against whatever
+// cmd's init() functions already registered before main() ever runs
+// this function.
+//
+// An empty manifest should fail loudly at startup rather than produce
+// a CLI that silently has no way to reach half its commands, so this
+// treats each of the following as a hard error: more than one level,
+// or zero levels, setting IsBase, since a fresh session needs exactly
+// one unambiguous starting point; a level whose Parent names another
+// level that does not exist in this manifest; a cycle in the parent
+// chain, detected by walking Parent from any level that has one and
+// requiring it to terminate, reach a level with an empty Parent,
+// within len(trees) steps; an unknown property name anywhere in the
+// manifest, the same way config.LoadSystemConfig and auth.LoadUsers
+// treat an unknown key in their own files; and a manifest containing
+// more than one YAML document.
+//
+// commonPath is merged into every level's tree exactly once, unless
+// that level sets skip_common. See MergeTrees's own doc comment for
+// why a name collision between a tree and the common tree is a hard
+// error rather than silently letting one side win.
+func LoadTreeStructure(manifestPath, commonPath string) (*TreeStructure, error) {
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading tree structure manifest %s: %w", manifestPath, err)
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+
+	var parsed treeStructureFile
+	if err := dec.Decode(&parsed); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parsing tree structure manifest %s: %w", manifestPath, err)
+	}
+
+	var extra treeStructureFile
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("tree structure manifest %s contains multiple YAML documents", manifestPath)
+		}
+		return nil, fmt.Errorf("parsing tree structure manifest %s: %w", manifestPath, err)
+	}
+
+	if len(parsed.Trees) == 0 {
+		return nil, fmt.Errorf("tree structure manifest %s defines no trees at all", manifestPath)
+	}
+
+	levels := make(map[string]*CommandLevel, len(parsed.Trees))
+	baseCount := 0
+	for name, cl := range parsed.Trees {
+		level := cl
+		level.Name = name
+		if level.IsBase {
+			baseCount++
+		}
+		levels[name] = &level
+	}
+	if baseCount == 0 {
+		return nil, fmt.Errorf("tree structure manifest %s has no base level (no tree sets is_base: true)", manifestPath)
+	}
+	if baseCount > 1 {
+		return nil, fmt.Errorf("tree structure manifest %s has more than one base level (more than one tree sets is_base: true)", manifestPath)
+	}
+	for name, l := range levels {
+		if l.Parent == "" {
+			continue
+		}
+		if _, ok := levels[l.Parent]; !ok {
+			return nil, fmt.Errorf("command level %q has parent %q, which is not defined in this manifest", name, l.Parent)
+		}
+	}
+
+	// Cycle detection: walk each level's Parent chain up to
+	// len(levels) steps. If it has not terminated by then, something
+	// loops.
+	for name, l := range levels {
+		cur := l
+		steps := 0
+		for cur.Parent != "" {
+			cur = levels[cur.Parent]
+			steps++
+			if steps > len(levels) {
+				return nil, fmt.Errorf("command level %q's parent chain does not terminate, check for a cycle", name)
+			}
+		}
+	}
+
+	commonTree, err := LoadTree(commonPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading common tree %s: %w", commonPath, err)
+	}
+
+	// Build the order, base first, then anything whose parent is
+	// already resolved, in whatever order that ends up being, since
+	// only the base level itself has no parent to wait on, along with
+	// each level's raw, pre-common-merge, tree. InheritParent needs
+	// the parent's already accumulated raw tree, not just the
+	// parent's own TreeFile, so this has to proceed top-down rather
+	// than in arbitrary map iteration order.
+	rawTrees := make(map[string]map[string]*Command, len(levels))
+	var order []*CommandLevel
+	remaining := make(map[string]*CommandLevel, len(levels))
+	for name, l := range levels {
+		remaining[name] = l
+	}
+	for len(remaining) > 0 {
+		progressed := false
+		for name, l := range remaining {
+			if l.Parent != "" {
+				if _, ready := rawTrees[l.Parent]; !ready {
+					continue // parent not resolved yet
+				}
+			}
+			ownRaw, err := LoadTree(l.TreeFile)
+			if err != nil {
+				return nil, fmt.Errorf("loading Command Level %q's file %s: %w", name, l.TreeFile, err)
+			}
+			effectiveRaw := ownRaw
+			if l.InheritParent && l.Parent != "" {
+				merged, err := MergeTrees(rawTrees[l.Parent], ownRaw)
+				if err != nil {
+					return nil, fmt.Errorf("merging Command Level %q with parent %q: %w", name, l.Parent, err)
+				}
+				effectiveRaw = merged
+			}
+			rawTrees[name] = effectiveRaw
+			finalTree := effectiveRaw
+			if !l.SkipCommonMerge {
+				merged, err := MergeTrees(effectiveRaw, commonTree)
+				if err != nil {
+					return nil, fmt.Errorf("merging Command Level %q with the common tree: %w", name, err)
+				}
+				finalTree = merged
+			}
+			l.Tree = finalTree
+			order = append(order, l)
+			delete(remaining, name)
+			progressed = true
+		}
+		if !progressed {
+			// The cycle detection pass above already covers this case,
+			// so this should be unreachable. It is kept as a hard stop
+			// rather than an infinite loop in case that pass is ever
+			// weakened without this loop being revisited too.
+			return nil, fmt.Errorf("tree structure manifest %s: could not resolve build order (unexpected cycle)", manifestPath)
+		}
+	}
+
+	return &TreeStructure{ByName: levels, Order: order}, nil
+}
+
+// RequireCurrentCommandLevel - This function is the one place "you must
+// be here to go there" is actually checked. It returns an error unless
+// the session's current Command Level, whatever CommandLevelStack
+// frame is on top, root or pushed, checked through Current().Name, is
+// exactly parent.
+// Every hand-written cmd/cmd_*.go file that enters a Command Level
+// calls this. A level reached by swapping the root frame calls it
+// indirectly through EnterCommandLevel, and a nested mode such as
+// config or config interface calls it directly. There is exactly one
+// enforcement mechanism, used the same way regardless of which kind
+// of level is being entered. target is used only for the error
+// message, naming both what is being entered and where the session
+// needs to be first, see the commandlevel.wrong_level key in
+// var/lang/en.yaml. Only parent is actually checked.
+//
+// This checks Current().Name rather than Session.CommandLevel on
+// purpose. Session.CommandLevel only ever names a level actually
+// reached through EnterCommandLevel or ExitCommandLevel, so it could
+// never express "you must currently be inside config to enter config
+// interface" in the first place, since config is never a
+// Session.CommandLevel value at all. Current().Name works uniformly
+// for both cases because EnterCommandLevel and ExitCommandLevel keep
+// the root frame's Name in sync with Session.CommandLevel through
+// CommandLevelStack.SetRootTree, so at the root, Current().Name and
+// Session.CommandLevel always agree, and for a pushed frame,
+// Current().Name is simply that frame's own Name.
+func RequireCurrentCommandLevel(ctx *AppContext, target, parent string) error {
+	if ctx.Position.Current().Name != parent {
+		return fmt.Errorf("%s", ctx.Translator.T("commandlevel.wrong_level", target, parent))
+	}
+	return nil
+}
+
+// EnterCommandLevel - This function does the generic, mechanical work
+// of moving a session into a root swap Command Level. That work is
+// RequireCurrentCommandLevel, the password check, updating
+// Session.CommandLevel and Session.CommandLevelEnteredAt, and
+// swapping the root CommandLevelStack frame through SetRootTree. It
+// deliberately does not print, log, or audit anything. Whether and
+// how to tell the user that the session moved, whether to write a log
+// line or an audit entry, or to say nothing at all, is entirely the
+// calling cmd/cmd_*.go file's decision, not this framework's.
+// Different projects, or even different levels in the same project,
+// may want different feedback here. See cmd/cmd_enable.go for the
+// calling convention.
+//
+// The return values distinguish four outcomes the caller needs to
+// tell apart:
+//   - entered true, err nil: the session moved into level. The caller
+//     decides what, if anything, to report.
+//   - entered false, err nil: the session was already at level. This
+//     is a no-op, not a failure. The caller decides what, if
+//     anything, to report, typically something like "Already in
+//     %s.", distinct from the entered true message.
+//   - entered false, err set, rate limited: level.RateLimiter has
+//     recorded enough recent failures to trigger a lockout, see
+//     auth.RateLimiter's own doc comment. This is checked and
+//     returned before ever prompting for a password, so a locked out
+//     session is not even invited to try again. The error is already
+//     a translated message naming how much longer the lockout has to
+//     run.
+//   - entered false, err set, refused: either the wrong current
+//     Command Level (see RequireCurrentCommandLevel) or a wrong or
+//     missing password. The error is already a translated message
+//     that the caller can return as is, or replace with its own.
+//
+// This is only meant for levels reached by swapping the root frame,
+// such as an exec or diagnostic level, tracked by Session.CommandLevel.
+// A nested, stacking mode such as config or config interface is
+// structurally different, since more than one of those can be active
+// at once, which SetRootTree cannot express. Those call
+// RequireCurrentCommandLevel directly and push a CommandLevelStack
+// frame themselves instead, see cmd_configure.go and cmd_interface.go.
+func EnterCommandLevel(ctx *AppContext, level, parent *CommandLevel) (entered bool, err error) {
+	if ctx.Session.CommandLevel == level.Name {
+		return false, nil
+	}
+	if err := RequireCurrentCommandLevel(ctx, level.Name, level.Parent); err != nil {
+		return false, err
+	}
+	if level.PasswordHash != "" {
+		// Checked before ever prompting. See this function's own doc
+		// comment on the four return value cases for why a locked out
+		// session is not invited to try again.
+		if ok, retryAfter := level.RateLimiter.Allow(); !ok {
+			return false, fmt.Errorf("%s", ctx.Translator.T("auth.too_many_attempts", auth.RoundForDisplay(retryAfter)))
+		}
+		password, perr := auth.PromptSecret(os.Stdout, int(os.Stdin.Fd()), ctx.Translator)
+		if perr != nil || !auth.VerifyPassword(level.PasswordHash, password) {
+			level.RateLimiter.RecordFailure()
+			return false, fmt.Errorf("%s", ctx.Translator.T("commandlevel.access_denied"))
+		}
+		level.RateLimiter.RecordSuccess()
+	}
+	ctx.Session.CommandLevel = level.Name
+	ctx.Session.CommandLevelEnteredAt = time.Now()
+	ctx.Position.SetRootTree(level.Name, level.PromptSuffix, level.Tree)
+	ctx.Logger.Debugln("DEBUG: session entered Command Level", level.Name, "for user", ctx.Session.Username)
+	return true, nil
+}
+
+// ExitCommandLevel - This function is the mirror of EnterCommandLevel.
+// It moves a session back from level to parent. It follows the same
+// no printing, no logging beyond Debugln policy, and returns the same
+// shape, exited instead of entered, for the same reason, see
+// EnterCommandLevel's own doc comment. exited is false with a nil
+// error when the session was not actually at level, a no-op rather
+// than a failure, for example "disable" run twice in a row, or from
+// somewhere it does not apply.
+func ExitCommandLevel(ctx *AppContext, level, parent *CommandLevel) (exited bool, err error) {
+	if ctx.Session.CommandLevel != level.Name {
+		return false, nil
+	}
+	ctx.Session.CommandLevel = parent.Name
+	ctx.Position.SetRootTree(parent.Name, parent.PromptSuffix, parent.Tree)
+	ctx.Logger.Debugln("DEBUG: session left Command Level", level.Name, "back to", parent.Name, "for user", ctx.Session.Username)
+	return true, nil
+}

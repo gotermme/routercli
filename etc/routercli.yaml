@@ -1,0 +1,104 @@
+# routercli YAML configuration file
+
+# --- Command Tree Location ---
+TreeStructure: var/tree/tree_structure.yaml
+
+
+# --- System Logging, History, and Audit Logs ---
+# Valid options for system logs are: 0, 1, 3, 5
+LogLevel: 0
+# LogFile: var/log/system.log   # empty (the default) means stderr
+AuditLogEnabled: false
+HistoryFile: var/log/history.log
+AuditLogFile: var/log/audit.log
+
+
+# --- Prevent Escape ---
+# Try to prevent a user from being able to escape to a shell. Off by default.
+PreventEscape: false
+
+
+# --- Language (i18n) ---
+CurrentLanguage: en
+DefaultLanguage: en
+LanguageDir: var/lang
+
+
+# --- Timeouts ---
+# Both disabled by default. Use Go duration syntax: "10m", "30s", "1h".
+#
+# Close entire session if no activity is seen in given time.
+# SessionIdleTimeout: 10m
+#
+# Automatically demotes an elevated session back to unprivileged after this
+# long, regardless of activity elsewhere.
+# ElevationTimeout: 5m
+
+
+# --- Multi-user authentication ---
+# AuthRequired turns on the login prompt at startup. Off by default so
+# the example works with zero setup. UsersFile is only read when
+# AuthRequired is true.
+AuthRequired: false
+UsersFile: etc/users.yaml
+LoginMaxAttempts: 3
+#
+# LoginAttemptWindow and LoginLockoutDuration are both disabled (0) by
+# default, matching RouterCLI's original flat maxAttempts behavior.
+# Uncomment both together, never just one, see etc/README.md, to opt
+# into a real lockout, matching Cisco's own "login block-for X
+# attempts Y within Z":
+# LoginAttemptWindow: 2m
+# LoginLockoutDuration: 5m
+#
+# The same shape, applied to elevating into a Command Level (e.g.
+# "enable") instead of the login prompt. Unlike login, this is
+# unlimited by default, since there was previously no limit here at
+# all:
+# CommandLevelMaxAttempts: 3
+# CommandLevelAttemptWindow: 2m
+# CommandLevelLockoutDuration: 5m
+#
+# ...and again, applied to an individual command's own password_hash
+# (see var/tree/README.md) rather than a whole Command Level's secret:
+# CommandPasswordMaxAttempts: 3
+# CommandPasswordAttemptWindow: 2m
+# CommandPasswordLockoutDuration: 5m
+
+
+# TOTPIssuer is shown in a user's authenticator app next to their
+# account name. It is cosmetic, but every mainstream app displays it.
+# Used both by `routercli --mfa <username>` and by the in-session
+# `totp enable` command. Per-user TOTP is opt-in, so only users with a
+# totp_secret set in UsersFile are ever prompted for a code.
+TOTPIssuer: RouterCLI
+#
+# TOTPMaxAttempts is how many times in a row a session may retype a
+# rejected code before `totp enable` or `totp disable` gives up on
+# that attempt, the same idea LoginMaxAttempts already applies to a
+# login prompt above.
+TOTPMaxAttempts: 3
+
+
+# --- Password policy, enforced by the "password change" command ---
+# PasswordMinLength is the shortest new password `password change`
+# accepts. NIST 800-63B recommends at least 8; 10 is a slightly
+# stronger default.
+PasswordMinLength: 10
+#
+# The three complexity switches below are all off by default. Current
+# guidance (NIST 800-63B) actually recommends against mandatory
+# composition rules, favoring length instead, since they tend to
+# produce predictable patterns rather than genuinely stronger
+# passwords. They exist here for deployments that still need to meet
+# a composition-based policy. Turn on only what you need:
+# PasswordRequireUppercase: true
+# PasswordRequireNumbers: true
+# PasswordRequireSpecialChars: true
+#
+# PasswordChangeMaxAttempts is how many times in a row `password
+# change` lets a session retry, both re-entering the current password
+# (and a TOTP code, if one is configured) and re-typing a new password
+# that failed to match its own confirmation or the policy above,
+# before giving up on that attempt.
+PasswordChangeMaxAttempts: 3
