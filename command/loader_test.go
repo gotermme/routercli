@@ -7,6 +7,7 @@ package command
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -67,6 +68,47 @@ commands:
 	_, err := LoadTree(path)
 	if err == nil {
 		t.Fatal("expected an error for a tree referencing an unregistered handler, got nil")
+	}
+}
+
+// TestLoadTreeEmptyFileReturnsNilTreeWithNoError - This test verifies
+// that a tree file containing nothing, or only comments, is not an
+// error. An empty command tree, zero commands, is unusual but valid,
+// distinct from a file that fails to parse at all.
+func TestLoadTreeEmptyFileReturnsNilTreeWithNoError(t *testing.T) {
+	path := writeTempFile(t, "tree-*.yaml", "# nothing but a comment\n")
+	tree, err := LoadTree(path)
+	if err != nil {
+		t.Fatalf("LoadTree returned unexpected error for an empty file: %v", err)
+	}
+	if tree != nil {
+		t.Errorf("expected a nil tree for an empty file, got %v", tree)
+	}
+}
+
+// TestLoadTreeUnknownHandlerNested - This test verifies that an
+// unregistered handler name on a nested subcommand is rejected with an
+// error naming the full "parent child" path, not just the leaf name in
+// isolation, so the message actually points at where the typo lives in
+// a larger tree file.
+func TestLoadTreeUnknownHandlerNested(t *testing.T) {
+	registerTestHandlers()
+	yaml := `
+commands:
+  show:
+    desc: "top"
+    subcommands:
+      version:
+        desc: "A nested command whose handler was never registered"
+        run: this.handler.does.not.exist
+`
+	path := writeTempFile(t, "tree-*.yaml", yaml)
+	_, err := LoadTree(path)
+	if err == nil {
+		t.Fatal("expected an error for a nested tree entry referencing an unregistered handler, got nil")
+	}
+	if !strings.Contains(err.Error(), "show version") {
+		t.Errorf("error = %q, expected it to name the full \"show version\" path", err.Error())
 	}
 }
 

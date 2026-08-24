@@ -105,3 +105,24 @@ func TestPromptLoginRefusesWhenRateLimited(t *testing.T) {
 		t.Errorf("expected auditFail to be called once with %q, got %v", "alice", audited)
 	}
 }
+
+// TestPromptLoginReturnsErrorWhenPasswordReadFails - This test
+// verifies the plain error path right after a username is read, with
+// no rate limiter configured at all: an invalid file descriptor makes
+// term.ReadPassword fail immediately, and PromptLogin must surface
+// that as an error rather than looping or panicking. This is the one
+// slice of the password-read branch reachable without a real terminal
+// file descriptor; the success path, and VerifySecondFactor's own
+// dispatch from inside it, need a genuine masked read and are only
+// exercised by the pty based interactive smoke test, not a fast unit
+// test.
+func TestPromptLoginReturnsErrorWhenPasswordReadFails(t *testing.T) {
+	var out bytes.Buffer
+	_, err := PromptLogin(strings.NewReader("alice\n"), &out, -1, testUsers(t), 3, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when the password read fails, got nil")
+	}
+	if err == ErrLoginFailed {
+		t.Error("expected the raw password-read error, not ErrLoginFailed, since the attempt loop never actually ran out")
+	}
+}

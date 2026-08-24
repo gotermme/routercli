@@ -360,6 +360,29 @@ func TestResolveNonNegatedUnaffected(t *testing.T) {
 	}
 }
 
+// TestResolveChasesAliasToRealCommand - This test verifies that an
+// exact match on an alias entry, the "?" key pointing at "help" the
+// way help_test.go's own tree shapes it, resolves to the real target
+// command's own Command, not the alias entry itself. FullName still
+// carries the literally typed token, "?", not the alias target's name,
+// since that is what the user actually typed and what a rewritten
+// completion buffer should show.
+func TestResolveChasesAliasToRealCommand(t *testing.T) {
+	help := &Command{Desc: "Display available commands", RunFunc: func(*AppContext, []string) error { return nil }}
+	tree := map[string]*Command{
+		"help": help,
+		"?":    {Alias: "help", Hidden: true},
+	}
+
+	res := Resolve(tree, []string{"?"})
+	if res.Command != help {
+		t.Errorf("expected \"?\" to resolve to the real \"help\" Command through its alias, got %+v", res.Command)
+	}
+	if len(res.FullName) != 1 || res.FullName[0] != "?" {
+		t.Errorf("FullName = %v, want [\"?\"] (the literally typed token, not the alias target)", res.FullName)
+	}
+}
+
 // TestCommandResolvedDescHelpArgHelp - This test verifies that
 // ResolvedDesc, ResolvedHelp, and ResolvedArgHelp each prefer their
 // translated form when a *Translator and the matching *Key field are

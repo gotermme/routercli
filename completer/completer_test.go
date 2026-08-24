@@ -414,6 +414,92 @@ func TestOnChangeArgHelpHintDetection(t *testing.T) {
 	}
 }
 
+// TestOnChangeNonTabKeyResetsDoubleTapStateAndDeclinesToRewrite - This
+// test verifies the branch that runs for any keypress other than Tab
+// or "?": it must report ok=false, leaving readline's own handling of
+// that key untouched, and it must reset tapCount and
+// lastAmbiguousInput, so a Tab press right after an unrelated key is
+// never misread as the second half of a double Tab sequence on
+// whatever was ambiguous before.
+func TestOnChangeNonTabKeyResetsDoubleTapStateAndDeclinesToRewrite(t *testing.T) {
+	l := &TreeListener{
+		position:           command.NewCommandLevelStack("exec", "", testTree()),
+		logger:             testLogger(),
+		tapCount:           2,
+		lastAmbiguousInput: "en",
+	}
+
+	line := []rune("x")
+	newLine, newPos, ok := l.OnChange(line, len(line), 'x')
+	if ok {
+		t.Error("expected OnChange to report ok=false for an ordinary, non-Tab, non-'?' key")
+	}
+	if newLine != nil || newPos != 0 {
+		t.Errorf("OnChange('x') = (%v, %d), want (nil, 0)", newLine, newPos)
+	}
+	if l.tapCount != 0 {
+		t.Errorf("tapCount = %d, want 0 after a non-Tab key", l.tapCount)
+	}
+	if l.lastAmbiguousInput != "" {
+		t.Errorf("lastAmbiguousInput = %q, want empty after a non-Tab key", l.lastAmbiguousInput)
+	}
+}
+
+// TestOnChangeAmbiguousPartialWordTracksTapCountWithoutPrinting - This
+// test verifies OnChange's own dispatch into the Ambiguous branch for a
+// genuinely partial, ambiguous word on the first Tab press: "en",
+// ambiguous between "enable" and "end", must leave tapCount at 1 and
+// record lastAmbiguousInput, without ever touching l.instance, since
+// ambiguousTokenIsEmpty is false and tapCount has not yet reached 2, so
+// the candidate list print is skipped. Nothing is left to expand
+// either, the rewritten buffer equals what was already typed, so ok
+// must be false. This is the OnChange-level counterpart to
+// TestAmbiguousRewriteBufferPreservesPartiallyTypedAmbiguousToken,
+// which only tests the pure helper directly.
+func TestOnChangeAmbiguousPartialWordTracksTapCountWithoutPrinting(t *testing.T) {
+	l := &TreeListener{position: command.NewCommandLevelStack("exec", "", testTree()), logger: testLogger()}
+
+	line := []rune("en")
+	newLine, newPos, ok := l.OnChange(line, len(line), readline.CharTab)
+	if ok {
+		t.Error("expected OnChange to report ok=false, nothing to expand for a still-ambiguous partial word")
+	}
+	if newLine != nil || newPos != 0 {
+		t.Errorf("OnChange(\"en\") = (%v, %d), want (nil, 0)", newLine, newPos)
+	}
+	if l.tapCount != 1 {
+		t.Errorf("tapCount = %d, want 1 after the first Tab on an ambiguous word", l.tapCount)
+	}
+	if l.lastAmbiguousInput != "en" {
+		t.Errorf("lastAmbiguousInput = %q, want %q", l.lastAmbiguousInput, "en")
+	}
+}
+
+// TestOnChangeNegatedUniqueCompletionAddsNoPrefix - This test verifies
+// that a "no "-prefixed line resolving uniquely is rewritten with the
+// "no " prefix preserved and the real command name expanded after it,
+// exercising OnChange's own noPrefix and resolvedLine assembly for a
+// negated line, not just Resolve()'s Negated flag in isolation.
+func TestOnChangeNegatedUniqueCompletionAddsNoPrefix(t *testing.T) {
+	tree := testTree()
+	tree["logging"] = &command.Command{Desc: "Configure logging", Negatable: true}
+	l := &TreeListener{position: command.NewCommandLevelStack("exec", "", tree), logger: testLogger()}
+
+	line := []rune("no logging")
+	newLine, newPos, ok := l.OnChange(line, len(line), readline.CharTab)
+	if !ok {
+		t.Fatal("expected OnChange to rewrite the buffer for \"no logging\" + Tab")
+	}
+	got := string(newLine)
+	want := "no logging "
+	if got != want {
+		t.Errorf("OnChange(%q) = %q, want %q", "no logging", got, want)
+	}
+	if newPos != len([]rune(want)) {
+		t.Errorf("OnChange(%q) cursor = %d, want %d", "no logging", newPos, len([]rune(want)))
+	}
+}
+
 // ----------------------------------------------------------------------
 //
 // "?" help

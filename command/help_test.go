@@ -165,6 +165,60 @@ func TestHelpForPathUnknownPathReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestHelpForPathLeafWithNoArgumentShowsCRHint - This test verifies
+// that a leaf command taking no arguments, no ArgHelp or ArgHelpKey
+// configured, shows the "<cr>" placeholder, real Cisco and HP
+// notation for "you can press enter here", rather than an empty hint
+// or the "you need an argument" form the other leaf test covers.
+func TestHelpForPathLeafWithNoArgumentShowsCRHint(t *testing.T) {
+	tree := map[string]*Command{
+		"exit": {Desc: "Exit the CLI", RunFunc: func(*AppContext, []string) error { return nil }},
+	}
+	got := HelpForPath(tree, []string{"exit"}, nil)
+	if got != " <cr>\n" {
+		t.Errorf("HelpForPath(exit ?) = %q, want %q", got, " <cr>\n")
+	}
+}
+
+// TestHelpForPathNegatedAmbiguousEmptyTokenShowsFullHelp - This test
+// verifies the negated companion to
+// TestHelpForPathContainerListsSubcommandsWithDescriptions: "no show
+// ?" must adjust AmbigAt for the stripped leading "no" before checking
+// whether the ambiguous token is empty, or it would consult the wrong
+// index into tokens and fall through to the bare word-help form
+// instead of the full, described listing.
+func TestHelpForPathNegatedAmbiguousEmptyTokenShowsFullHelp(t *testing.T) {
+	tree := helpForPathTestTree()
+	got := HelpForPath(tree, []string{"no", "show", ""}, nil)
+
+	for _, want := range []string{"version", "running-config", "startup-config", "Show version"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("HelpForPath(no show ?) = %q, expected it to contain %q", got, want)
+		}
+	}
+}
+
+// TestHelpForPathNegatedAmbiguousPartialWordListsPlainNames - This
+// test verifies the negated companion to
+// TestHelpForPathAmbiguousListsPlainNames: "no s?" must apply the same
+// AmbigAt adjustment for a genuinely partial word, landing on the
+// bare, undescribed word-help form rather than panicking or reading
+// the wrong token.
+func TestHelpForPathNegatedAmbiguousPartialWordListsPlainNames(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {Desc: "Show things", Negatable: true, RunFunc: func(*AppContext, []string) error { return nil }},
+		"set":  {Desc: "Set things", Negatable: true, RunFunc: func(*AppContext, []string) error { return nil }},
+	}
+	got := HelpForPath(tree, []string{"no", "s"}, nil)
+
+	if !strings.Contains(got, "show") || !strings.Contains(got, "set") {
+		t.Errorf("HelpForPath(no s?) = %q, expected both \"show\" and \"set\" listed", got)
+	}
+	if strings.Contains(got, "Show things") {
+		t.Errorf("HelpForPath(no s?) = %q, expected bare names only (word help), not descriptions", got)
+	}
+}
+
 // TestHelpForPathAmbiguousListsPlainNames - This test verifies that a partial word
 // matching more than one candidate, for example "s?" when both "show"
 // and "set" exist, is listed as bare names, matching Tab completion's
