@@ -125,6 +125,31 @@ func main() {
 	// cmd/cmd_*.go file every level's enter and exit command always
 	// needs. See command/treestructure.go's own top of file comment.
 
+	// A command whose own feature is turned off in configuration is
+	// pruned out of every level's Tree entirely, right here, before
+	// anything else touches these trees, rate limiter wiring included,
+	// so a disabled command never shows up in help, tab completion, or
+	// VerifyCommandLevels below, rather than existing and refusing.
+	// See command.PruneDisabledCommands's own doc comment and
+	// var/tree/level_user.yaml, which sets requires: totp and
+	// requires: password_change on its own two container commands.
+	// featureFlags is the complete set of flag names any tree file in
+	// this project is allowed to reference through requires:, a naming
+	// convention private to this file, not something package command
+	// itself defines. Adding a new gated feature later means adding
+	// its own entry here, naming whichever SystemConfig boolean
+	// actually controls it.
+	featureFlags := map[string]bool{
+		"totp":            config.EnableTOTPAuthentication,
+		"password_change": config.EnableCLIAuthentication,
+	}
+	for _, level := range levels.Order {
+		if err := command.PruneDisabledCommands(level.Tree, featureFlags, ""); err != nil {
+			fmt.Fprintln(os.Stderr, "failed to prune disabled commands from the tree:", err)
+			os.Exit(1)
+		}
+	}
+
 	// Rate limiters are wired in here, right after loading rather than
 	// during it, deliberately. LoadTreeStructure's job is building a
 	// correct TreeStructure from the manifest. Nothing about policy,
@@ -229,29 +254,52 @@ func main() {
 		ctx.PasswordChangeMaxAttempts = config.PasswordChangeMaxAttempts
 		warnPlaintextUserSecrets(logger, users)
 
-		// A real *auth.KeyedRateLimiter only gets constructed when
-		// LoginAttemptWindow is actually configured, meaning nonzero.
-		// LoadSystemConfig's own validate already guarantees that
-		// LoginAttemptWindow and LoginLockoutDuration are either both
-		// zero or both set, so checking just one here is sufficient. A
-		// nil rate limiter tells PromptLogin to keep this project's
-		// original flat maxAttempts behavior unchanged. See
-		// PromptLogin's own doc comment.
-		var loginRateLimiter *auth.KeyedRateLimiter
-		if config.LoginAttemptWindow.AsDuration() > 0 {
-			loginRateLimiter = auth.NewKeyedRateLimiter(config.LoginMaxAttempts, config.LoginAttemptWindow.AsDuration(), config.LoginLockoutDuration.AsDuration())
+		// ctx.AuthProvider is only built when EnableCLIAuthentication is
+		// actually on, since it is only ever consulted by
+		// auth.PromptLogin's own credential check, inside
+		// establishSession below, and by cmd/cmd_password.go's password
+		// change re-authentication step. That password change command
+		// itself sets requires: password_change, so it is pruned out of
+		// the tree entirely whenever EnableCLIAuthentication is off,
+		// see the featureFlags pruning pass above. Leaving this nil in
+		// the host-only case is therefore safe: nothing reachable in
+		// that configuration ever calls ctx.AuthProvider.Authenticate.
+		if config.EnableCLIAuthentication {
+			provider, err := auth.NewAuthProvider(config.CLIAuthProvider, users)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "failed to construct authentication provider:", err)
+				os.Exit(1)
+			}
+			ctx.AuthProvider = provider
 		}
 
-		session, err := auth.PromptLogin(os.Stdin, os.Stdout, int(os.Stdin.Fd()), users, config.LoginMaxAttempts, loginRateLimiter, translator,
-			func(username string) { audit.Log(username, "LOGIN", false) })
+		session, err := establishSession(config, users, ctx.AuthProvider, translator, audit)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\n%", translator.T("auth.access_denied"))
 			os.Exit(1)
 		}
 		session.CommandLevel = base.Name
 		ctx.Session = session
-		audit.Log(session.Username, "LOGIN", true)
 	}
+
+	// The SESSION START audit entry is written unconditionally here,
+	// after ctx.Session has its final value either way, regardless of
+	// whether config.AuthRequired is even on, so every connection to
+	// routercli leaves a record of when it began, not only ones that
+	// happen to run a login prompt. ForceLog, not Log, is used
+	// deliberately, the same reasoning ForceLog's own doc comment
+	// gives for "audit-log disable": a session's own start must never
+	// be silently missing from the trail just because something
+	// between here and whatever ends the session flips audit logging
+	// off. See runLoop's own SESSION END logging for the other half of
+	// this pair, and Session.HostUsername's own doc comment for why
+	// that, and HostConnectedAt, are folded into this one entry's own
+	// command text rather than becoming a new Auditor column.
+	sessionStartText := "SESSION START"
+	if ctx.Session.HostUsername != "" {
+		sessionStartText = fmt.Sprintf("SESSION START (host account %q connected at %s)", ctx.Session.HostUsername, ctx.Session.HostConnectedAt.Format(time.RFC3339))
+	}
+	audit.ForceLog(ctx.Session.Username, sessionStartText, true)
 
 	histFile := config.HistoryFile
 	if histFile == "" {
@@ -296,6 +344,114 @@ func main() {
 		OrigTerminalState:  origTermState,
 	})
 } // main()
+
+// establishSession - This function resolves a session's identity from
+// whichever combination of config.SystemConfig.EnableHostAuthentication,
+// EnableCLIAuthentication, and EnableTOTPAuthentication this
+// deployment has turned on, returning the resulting *auth.Session or
+// the first error encountered along the way. main calls this exactly
+// once, only when config.AuthRequired is true, config.validateAuthSources
+// already guarantees that AuthRequired being true means at least one
+// of EnableHostAuthentication or EnableCLIAuthentication is also true,
+// so this function can assume it always has at least one identity
+// source to work with.
+//
+// When EnableHostAuthentication alone is on, the returned session
+// carries the trusted operating system account on both Username and
+// HostUsername, see auth.SessionFromHostIdentity, with no password
+// prompt at all. If EnableTOTPAuthentication is also on, and the
+// resolved account's own users.yaml entry, if any, has a TOTPSecret
+// configured, a standalone TOTP challenge is required before the
+// session is handed back, reusing the same auth.SecondFactorRequired
+// and auth.VerifySecondFactor machinery auth.PromptLogin's own login
+// flow uses, up to loginMaxAttempts tries. A resolved account with no
+// matching users.yaml entry at all is treated the same way
+// auth.PromptLogin treats one, see its own doc comment, a real
+// identity simply carrying no second factor.
+//
+// When EnableCLIAuthentication is on, auth.PromptLogin drives the
+// session the rest of the way, checked against provider, with
+// totpEnabled passed straight through from EnableTOTPAuthentication.
+// If EnableHostAuthentication also resolved a session first, the
+// shared account case described on Session.HostUsername's own doc
+// comment, that earlier session's HostUsername and HostConnectedAt
+// are carried over onto the CLI-resolved session before it is
+// returned, so the final session's own Username is whichever identity
+// the CLI login actually resolved to, while still keeping a record of
+// which OS account the connection itself arrived as.
+//
+// audit records a "LOGIN" entry for every attempt along the way,
+// success or failure, the same as this project has always done for
+// its CLI login path, now also covering the standalone host-plus-TOTP
+// step up, which had no login attempt of its own to audit before this
+// function existed.
+func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.AuthProvider, translator *i18n.Translator, audit *auditlog.AuditLog) (*auth.Session, error) {
+	var hostSession *auth.Session
+	if cfg.EnableHostAuthentication {
+		s, err := auth.SessionFromHostIdentity()
+		if err != nil {
+			return nil, err
+		}
+		hostSession = s
+	}
+
+	if cfg.EnableCLIAuthentication {
+		// A real *auth.KeyedRateLimiter only gets constructed when
+		// LoginAttemptWindow is actually configured, meaning nonzero.
+		// LoadSystemConfig's own validate already guarantees that
+		// LoginAttemptWindow and LoginLockoutDuration are either both
+		// zero or both set, so checking just one here is sufficient. A
+		// nil rate limiter tells PromptLogin to keep this project's
+		// original flat maxAttempts behavior unchanged. See
+		// PromptLogin's own doc comment.
+		var loginRateLimiter *auth.KeyedRateLimiter
+		if cfg.LoginAttemptWindow.AsDuration() > 0 {
+			loginRateLimiter = auth.NewKeyedRateLimiter(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow.AsDuration(), cfg.LoginLockoutDuration.AsDuration())
+		}
+
+		cliSession, err := auth.PromptLogin(os.Stdin, os.Stdout, int(os.Stdin.Fd()), provider, users, cfg.EnableTOTPAuthentication, cfg.LoginMaxAttempts, loginRateLimiter, translator,
+			func(username string) { audit.Log(username, "LOGIN", false) })
+		if err != nil {
+			return nil, err
+		}
+		if hostSession != nil {
+			cliSession.HostUsername = hostSession.HostUsername
+			cliSession.HostConnectedAt = hostSession.HostConnectedAt
+		}
+		audit.Log(cliSession.Username, "LOGIN", true)
+		return cliSession, nil
+	}
+
+	// EnableCLIAuthentication is off, so hostSession is the whole
+	// story, config.validateAuthSources already guarantees it is
+	// non-nil here. The only thing left to decide is whether
+	// EnableTOTPAuthentication requires a step up on top of it.
+	if cfg.EnableTOTPAuthentication {
+		u := users[hostSession.Username]
+		if u == nil {
+			// See auth.PromptLogin's own doc comment for the same
+			// guard: a resolved identity with no matching users.yaml
+			// entry simply has no second factor to check.
+			u = &auth.User{Username: hostSession.Username}
+		}
+		if auth.SecondFactorRequired(u) {
+			reader := bufio.NewReader(os.Stdin)
+			verified := false
+			for attempt := 1; attempt <= cfg.LoginMaxAttempts; attempt++ {
+				if auth.VerifySecondFactor(os.Stdout, reader, int(os.Stdin.Fd()), u, translator) {
+					verified = true
+					break
+				}
+				audit.Log(hostSession.Username, "LOGIN", false)
+			}
+			if !verified {
+				return nil, auth.ErrLoginFailed
+			}
+		}
+	}
+	audit.Log(hostSession.Username, "LOGIN", true)
+	return hostSession, nil
+}
 
 // defaultHostnamePrompt - This constant is what the prompt shows
 // before "hostname" has ever been set, or after "no hostname" resets
@@ -443,6 +599,13 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				line, err = res.line, res.err
 			case <-time.After(opts.SessionIdleTimeout):
 				fmt.Println(ctx.Translator.T("runloop.idle_timeout"))
+				// os.Exit below terminates the process immediately, so
+				// SESSION END is logged right here rather than after
+				// this select, the same reason this branch already
+				// restores the terminal directly instead of relying on
+				// main's own deferred cleanup. See this function's own
+				// doc comment on opts.SessionIdleTimeout for why.
+				logSessionEnd(ctx)
 				if opts.OrigTerminalState != nil {
 					_ = term.Restore(opts.TerminalFD, opts.OrigTerminalState)
 				}
@@ -628,6 +791,7 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				ctx.Audit.ForceLog(username, line, runErr == nil)
 			}
 			if runErr == command.ErrQuit {
+				logSessionEnd(ctx)
 				return
 			}
 			if runErr != nil {
@@ -637,6 +801,30 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			treeListener.SetPrompt(buildPrompt(ctx))
 		}
 	}
+	// Reached by the two ordinary "break" exits above, Ctrl-C on an
+	// empty line and Ctrl-D/EOF, neither of which goes through
+	// command.ErrQuit. See this function's own doc comment on
+	// opts.PreventEscape. The command.ErrQuit path and the idle
+	// timeout path each log their own SESSION END before leaving this
+	// function through return or os.Exit respectively, since neither
+	// of those two ever reaches this line.
+	logSessionEnd(ctx)
+}
+
+// logSessionEnd - This function writes the mandatory SESSION END audit
+// entry, called from every real exit path out of runLoop, normal
+// return, command.ErrQuit, and the idle timeout's own os.Exit branch,
+// so a session that started with a SESSION START entry, see main's own
+// logging right after establishSession returns, always gets a matching
+// end entry too, regardless of which door it left through. ForceLog is
+// used for the same reason main's own SESSION START call uses it, see
+// that call site's own doc comment.
+func logSessionEnd(ctx *command.AppContext) {
+	username := ""
+	if ctx.Session != nil {
+		username = ctx.Session.Username
+	}
+	ctx.Audit.ForceLog(username, "SESSION END", true)
 }
 
 // runHashPasswordUtility - This function implements the

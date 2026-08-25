@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -77,11 +78,29 @@ func TestLoadSystemConfigValid(t *testing.T) {
 
 		PasswordMinLength:         10,
 		PasswordChangeMaxAttempts: 3,
+
+		EnableCLIAuthentication:  true,
+		EnableTOTPAuthentication: true,
+		AuthProviders:            []AuthProviderConfig{{Name: "local", Type: "local"}},
+		CLIAuthProvider:          "local",
 	}
 
-	if cfg != want {
+	if !systemConfigsEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want %+v", cfg, want)
 	}
+}
+
+// systemConfigsEqual - This function compares two SystemConfig values
+// field for field, standing in for a plain == comparison now that
+// AuthProviders is a slice. A struct with a slice field is not
+// comparable with == at all in Go, a compile error rather than a
+// runtime one, regardless of whether that particular slice happens to
+// be nil. reflect.DeepEqual is the standard way around that, and
+// treats two nil-vs-empty AuthProviders slices as equal, matching
+// what every test in this file comparing "the zero value never set"
+// against "explicitly set to empty" already expects.
+func systemConfigsEqual(a, b SystemConfig) bool {
+	return reflect.DeepEqual(a, b)
 }
 
 // TestLoadSystemConfigUnknownKey - This test verifies that a config file
@@ -288,6 +307,55 @@ func TestLoadSystemConfigPasswordComplexityFlags(t *testing.T) {
 	}
 }
 
+// TestLoadSystemConfigAuthProvidersParsesFromYAML - This test verifies
+// that an AuthProviders list, and CLIAuthProvider naming one of its
+// entries, load from YAML correctly, replacing the single default
+// "local" entry entirely rather than being appended to it, the same
+// whole-value-replaces-default behavior every other field in this
+// file already has.
+func TestLoadSystemConfigAuthProvidersParsesFromYAML(t *testing.T) {
+	content := "AuthProviders:\n" +
+		"  - name: local\n" +
+		"    type: local\n" +
+		"  - name: corp-ldap\n" +
+		"    type: ldap\n" +
+		"CLIAuthProvider: corp-ldap\n"
+
+	cfg, err := LoadSystemConfig(tempDirFile(t, "routercli.yaml", content))
+	if err != nil {
+		t.Fatalf("LoadSystemConfig returned unexpected error: %v", err)
+	}
+
+	want := []AuthProviderConfig{{Name: "local", Type: "local"}, {Name: "corp-ldap", Type: "ldap"}}
+	if len(cfg.AuthProviders) != len(want) {
+		t.Fatalf("AuthProviders = %+v, want %+v", cfg.AuthProviders, want)
+	}
+	for i := range want {
+		if cfg.AuthProviders[i] != want[i] {
+			t.Errorf("AuthProviders[%d] = %+v, want %+v", i, cfg.AuthProviders[i], want[i])
+		}
+	}
+
+	if cfg.CLIAuthProvider != "corp-ldap" {
+		t.Errorf("CLIAuthProvider = %q, want %q", cfg.CLIAuthProvider, "corp-ldap")
+	}
+}
+
+// TestLoadSystemConfigCLIAuthProviderUnknownNameIsError - This test
+// verifies that LoadSystemConfig, not only validate in isolation,
+// rejects a CLIAuthProvider that does not match any AuthProviders
+// entry, since a typo here would otherwise silently authenticate
+// against the wrong backend, or none at all, rather than failing
+// loudly at startup.
+func TestLoadSystemConfigCLIAuthProviderUnknownNameIsError(t *testing.T) {
+	content := "CLIAuthProvider: does-not-exist\n"
+	path := tempDirFile(t, "routercli.yaml", content)
+
+	if _, err := LoadSystemConfig(path); err == nil {
+		t.Fatal("expected an error for a CLIAuthProvider naming an unknown AuthProviders entry, got nil")
+	}
+}
+
 // TestLoadSystemConfigValidTimeouts - This test verifies that a well-formed
 // duration string for both timeout fields parses into the expected
 // Duration.
@@ -390,7 +458,7 @@ func TestLoadSystemConfigMissingFileUsesDefaults(t *testing.T) {
 	}
 
 	want := DefaultSystemConfig()
-	if cfg != want {
+	if !systemConfigsEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want default %+v", cfg, want)
 	}
 }
@@ -405,7 +473,7 @@ func TestLoadSystemConfigEmptyPathUsesDefaults(t *testing.T) {
 	}
 
 	want := DefaultSystemConfig()
-	if cfg != want {
+	if !systemConfigsEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want default %+v", cfg, want)
 	}
 }
@@ -422,7 +490,7 @@ func TestLoadSystemConfigEmptyFileUsesDefaults(t *testing.T) {
 	}
 
 	want := DefaultSystemConfig()
-	if cfg != want {
+	if !systemConfigsEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want default %+v", cfg, want)
 	}
 }
@@ -439,7 +507,7 @@ func TestLoadSystemConfigCommentsOnlyUsesDefaults(t *testing.T) {
 	}
 
 	want := DefaultSystemConfig()
-	if cfg != want {
+	if !systemConfigsEqual(cfg, want) {
 		t.Errorf("cfg = %+v, want default %+v", cfg, want)
 	}
 }
@@ -569,6 +637,26 @@ func TestDefaultSystemConfigValues(t *testing.T) {
 
 	if cfg.PasswordChangeMaxAttempts != 3 {
 		t.Errorf("PasswordChangeMaxAttempts default = %d, want 3", cfg.PasswordChangeMaxAttempts)
+	}
+
+	if cfg.EnableHostAuthentication {
+		t.Error("EnableHostAuthentication default = true, want false")
+	}
+
+	if !cfg.EnableCLIAuthentication {
+		t.Error("EnableCLIAuthentication default = false, want true (today's original behavior)")
+	}
+
+	if !cfg.EnableTOTPAuthentication {
+		t.Error("EnableTOTPAuthentication default = false, want true (matches the per-user TOTPSecret check that already existed before this setting did)")
+	}
+
+	if want := []AuthProviderConfig{{Name: "local", Type: "local"}}; len(cfg.AuthProviders) != len(want) || cfg.AuthProviders[0] != want[0] {
+		t.Errorf("AuthProviders default = %+v, want %+v", cfg.AuthProviders, want)
+	}
+
+	if cfg.CLIAuthProvider != "local" {
+		t.Errorf("CLIAuthProvider default = %q, want %q", cfg.CLIAuthProvider, "local")
 	}
 }
 
@@ -764,6 +852,82 @@ func TestSystemConfigValidate(t *testing.T) {
 			name: "negative elevation timeout",
 			mutate: func(c *SystemConfig) {
 				c.ElevationTimeout = Duration(-time.Second)
+			},
+			wantErr: true,
+		},
+		{
+			name: "AuthRequired with neither host nor CLI authentication enabled",
+			mutate: func(c *SystemConfig) {
+				c.AuthRequired = true
+				c.EnableHostAuthentication = false
+				c.EnableCLIAuthentication = false
+			},
+			wantErr: true,
+		},
+		{
+			name: "AuthRequired with only host authentication enabled",
+			mutate: func(c *SystemConfig) {
+				c.AuthRequired = true
+				c.EnableHostAuthentication = true
+				c.EnableCLIAuthentication = false
+			},
+			wantErr: false,
+		},
+		{
+			name: "TOTP authentication with neither host nor CLI authentication enabled",
+			mutate: func(c *SystemConfig) {
+				c.EnableTOTPAuthentication = true
+				c.EnableHostAuthentication = false
+				c.EnableCLIAuthentication = false
+			},
+			wantErr: true,
+		},
+		{
+			name: "TOTP authentication alongside host authentication only",
+			mutate: func(c *SystemConfig) {
+				c.EnableTOTPAuthentication = true
+				c.EnableHostAuthentication = true
+				c.EnableCLIAuthentication = false
+			},
+			wantErr: false,
+		},
+		{
+			name: "CLI authentication enabled with an empty CLIAuthProvider",
+			mutate: func(c *SystemConfig) {
+				c.EnableCLIAuthentication = true
+				c.CLIAuthProvider = ""
+			},
+			wantErr: true,
+		},
+		{
+			name: "CLIAuthProvider naming a provider that does not exist",
+			mutate: func(c *SystemConfig) {
+				c.EnableCLIAuthentication = true
+				c.CLIAuthProvider = "does-not-exist"
+			},
+			wantErr: true,
+		},
+		{
+			name: "AuthProviders entry with an empty name",
+			mutate: func(c *SystemConfig) {
+				c.AuthProviders = []AuthProviderConfig{{Name: "", Type: "local"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "AuthProviders entry with an empty type",
+			mutate: func(c *SystemConfig) {
+				c.AuthProviders = []AuthProviderConfig{{Name: "local", Type: ""}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "AuthProviders with two entries sharing the same name",
+			mutate: func(c *SystemConfig) {
+				c.AuthProviders = []AuthProviderConfig{
+					{Name: "local", Type: "local"},
+					{Name: "local", Type: "ldap"},
+				}
 			},
 			wantErr: true,
 		},
@@ -1034,6 +1198,15 @@ func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 		PasswordRequireNumbers:      true,
 		PasswordRequireSpecialChars: true,
 		PasswordChangeMaxAttempts:   5,
+
+		EnableHostAuthentication: true,
+		EnableCLIAuthentication:  true,
+		EnableTOTPAuthentication: true,
+		AuthProviders: []AuthProviderConfig{
+			{Name: "local", Type: "local"},
+			{Name: "corp-ldap", Type: "ldap"},
+		},
+		CLIAuthProvider: "local",
 	}
 
 	data, err := yaml.Marshal(in)
@@ -1046,7 +1219,7 @@ func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 		t.Fatalf("yaml.Unmarshal(%q) returned error: %v", data, err)
 	}
 
-	if out != in {
+	if !systemConfigsEqual(out, in) {
 		t.Fatalf("round trip = %+v, want %+v", out, in)
 	}
 }
@@ -1062,7 +1235,7 @@ func TestLoadSystemConfigEmptyMappingUsesDefaults(t *testing.T) {
 		t.Fatalf("empty mapping should use defaults, got error: %v", err)
 	}
 
-	if cfg != DefaultSystemConfig() {
+	if !systemConfigsEqual(cfg, DefaultSystemConfig()) {
 		t.Fatalf("cfg = %+v, want default %+v", cfg, DefaultSystemConfig())
 	}
 }
@@ -1078,7 +1251,7 @@ func TestLoadSystemConfigWhitespaceOnlyUsesDefaults(t *testing.T) {
 		t.Fatalf("whitespace-only file should use defaults, got error: %v", err)
 	}
 
-	if cfg != DefaultSystemConfig() {
+	if !systemConfigsEqual(cfg, DefaultSystemConfig()) {
 		t.Fatalf("cfg = %+v, want default %+v", cfg, DefaultSystemConfig())
 	}
 }
@@ -1095,7 +1268,7 @@ func TestLoadSystemConfigDirectoryAsConfigFileErrors(t *testing.T) {
 		t.Fatal("expected an error when config path is a directory, got nil")
 	}
 
-	if cfg != DefaultSystemConfig() {
+	if !systemConfigsEqual(cfg, DefaultSystemConfig()) {
 		t.Errorf("cfg = %+v, want default %+v on read error", cfg, DefaultSystemConfig())
 	}
 }

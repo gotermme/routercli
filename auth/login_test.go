@@ -23,11 +23,20 @@ func testUsers(t *testing.T) Users {
 	}
 }
 
+// testProvider - This helper builds the AuthProvider VerifyLogin and
+// PromptLogin now require, backed by testUsers, so every call site in
+// this file can pass a real provider rather than a Users map
+// directly.
+func testProvider(t *testing.T) AuthProvider {
+	t.Helper()
+	return NewLocalAuthProvider(testUsers(t))
+}
+
 // TestVerifyLoginSuccess - This test verifies that a correct username and password
 // produce an authenticated session with no CommandLevel set yet, since
 // that is main.go's job right after construction.
 func TestVerifyLoginSuccess(t *testing.T) {
-	session, ok := VerifyLogin(testUsers(t), "alice", "s3cret")
+	session, ok := VerifyLogin(testProvider(t), "alice", "s3cret")
 	if !ok {
 		t.Fatal("expected login to succeed with the correct password")
 	}
@@ -42,7 +51,7 @@ func TestVerifyLoginSuccess(t *testing.T) {
 // TestVerifyLoginWrongPassword - This test verifies that a known username with the
 // wrong password fails login.
 func TestVerifyLoginWrongPassword(t *testing.T) {
-	_, ok := VerifyLogin(testUsers(t), "alice", "wrong")
+	_, ok := VerifyLogin(testProvider(t), "alice", "wrong")
 	if ok {
 		t.Error("expected login to fail with an incorrect password")
 	}
@@ -51,7 +60,7 @@ func TestVerifyLoginWrongPassword(t *testing.T) {
 // TestVerifyLoginUnknownUser - This test verifies that a username with no matching
 // User fails login.
 func TestVerifyLoginUnknownUser(t *testing.T) {
-	_, ok := VerifyLogin(testUsers(t), "nobody", "s3cret")
+	_, ok := VerifyLogin(testProvider(t), "nobody", "s3cret")
 	if ok {
 		t.Error("expected login to fail for a username that does not exist")
 	}
@@ -72,7 +81,7 @@ func TestVerifyLoginUnknownUser(t *testing.T) {
 // hardware.
 func TestVerifyLoginUnknownUserTakesRealComparisonTime(t *testing.T) {
 	start := time.Now()
-	VerifyLogin(testUsers(t), "nobody-at-all", "whatever")
+	VerifyLogin(testProvider(t), "nobody-at-all", "whatever")
 	elapsed := time.Since(start)
 	if elapsed < 10*time.Millisecond {
 		t.Errorf("VerifyLogin for an unknown username returned in %s, want at least 10ms (a real bcrypt comparison); the dummy comparison may have been skipped, reintroducing the username enumeration timing side channel", elapsed)
@@ -96,7 +105,7 @@ func TestPromptLoginRefusesWhenRateLimited(t *testing.T) {
 	auditFail := func(username string) { audited = append(audited, username) }
 
 	var out bytes.Buffer
-	_, err := PromptLogin(strings.NewReader("alice\n"), &out, -1, testUsers(t), 3, rl, nil, auditFail)
+	_, err := PromptLogin(strings.NewReader("alice\n"), &out, -1, testProvider(t), testUsers(t), true, 3, rl, nil, auditFail)
 
 	if err != ErrLoginFailed {
 		t.Errorf("expected ErrLoginFailed, got %v", err)
@@ -118,7 +127,7 @@ func TestPromptLoginRefusesWhenRateLimited(t *testing.T) {
 // test.
 func TestPromptLoginReturnsErrorWhenPasswordReadFails(t *testing.T) {
 	var out bytes.Buffer
-	_, err := PromptLogin(strings.NewReader("alice\n"), &out, -1, testUsers(t), 3, nil, nil, nil)
+	_, err := PromptLogin(strings.NewReader("alice\n"), &out, -1, testProvider(t), testUsers(t), true, 3, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the password read fails, got nil")
 	}

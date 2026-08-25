@@ -35,7 +35,16 @@ func newPasswordTestContext(t *testing.T, username string, u *auth.User) *comman
 	ctx.UsersFile = filepath.Join(t.TempDir(), "users.yaml")
 	ctx.PasswordPolicy = auth.PasswordPolicy{MinLength: 1}
 	ctx.PasswordChangeMaxAttempts = 3
+	ctx.AuthProvider = auth.NewLocalAuthProvider(ctx.Users)
 	return ctx
+}
+
+// testReauthProvider - This helper builds the auth.AuthProvider
+// verifyReauth now requires, backed by a Users map containing exactly
+// user, for the tests below that call verifyReauth directly rather
+// than through a *command.AppContext.
+func testReauthProvider(user *auth.User) auth.AuthProvider {
+	return auth.NewLocalAuthProvider(auth.Users{user.Username: user})
 }
 
 // ----------------------------------------------------------------------
@@ -51,7 +60,7 @@ func TestVerifyReauthAcceptsCorrectPasswordWithNoSecondFactor(t *testing.T) {
 	hash, _ := auth.HashPassword("s3cret")
 	user := &auth.User{Username: "alice", PasswordHash: hash}
 
-	if !verifyReauth(user, "s3cret", "", time.Now()) {
+	if !verifyReauth(testReauthProvider(user), user, "s3cret", "", time.Now()) {
 		t.Error("expected verifyReauth to accept a correct password with no second factor configured")
 	}
 }
@@ -63,7 +72,7 @@ func TestVerifyReauthRejectsWrongPasswordWithNoSecondFactor(t *testing.T) {
 	hash, _ := auth.HashPassword("s3cret")
 	user := &auth.User{Username: "alice", PasswordHash: hash}
 
-	if verifyReauth(user, "wrong-password", "", time.Now()) {
+	if verifyReauth(testReauthProvider(user), user, "wrong-password", "", time.Now()) {
 		t.Error("expected verifyReauth to reject a wrong password")
 	}
 }
@@ -78,7 +87,7 @@ func TestVerifyReauthAcceptsCorrectPasswordAndCodeWithSecondFactor(t *testing.T)
 	now := time.Now()
 	code, _ := auth.GenerateTOTPCode(secret, now)
 
-	if !verifyReauth(user, "s3cret", code, now) {
+	if !verifyReauth(testReauthProvider(user), user, "s3cret", code, now) {
 		t.Error("expected verifyReauth to accept a correct password and a valid TOTP code")
 	}
 }
@@ -94,7 +103,7 @@ func TestVerifyReauthRejectsCorrectPasswordWithWrongCode(t *testing.T) {
 	now := time.Now()
 	wrongCode, _ := auth.GenerateTOTPCode(secret, now.Add(-10*time.Minute))
 
-	if verifyReauth(user, "s3cret", wrongCode, now) {
+	if verifyReauth(testReauthProvider(user), user, "s3cret", wrongCode, now) {
 		t.Error("expected verifyReauth to reject a correct password with a wrong TOTP code")
 	}
 }
@@ -109,7 +118,7 @@ func TestVerifyReauthRejectsCorrectPasswordWithEmptyCode(t *testing.T) {
 	secret, _ := auth.GenerateTOTPSecret()
 	user := &auth.User{Username: "alice", PasswordHash: hash, TOTPSecret: secret}
 
-	if verifyReauth(user, "s3cret", "", time.Now()) {
+	if verifyReauth(testReauthProvider(user), user, "s3cret", "", time.Now()) {
 		t.Error("expected verifyReauth to reject a correct password with an empty code when a second factor is configured")
 	}
 }
@@ -126,7 +135,7 @@ func TestVerifyReauthRejectsWrongPasswordEvenWithValidCode(t *testing.T) {
 	now := time.Now()
 	code, _ := auth.GenerateTOTPCode(secret, now)
 
-	if verifyReauth(user, "wrong-password", code, now) {
+	if verifyReauth(testReauthProvider(user), user, "wrong-password", code, now) {
 		t.Error("expected verifyReauth to reject a wrong password even with a valid TOTP code")
 	}
 }

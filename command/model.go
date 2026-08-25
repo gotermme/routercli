@@ -105,6 +105,22 @@ type CommandLevelStack struct {
 // non-empty PasswordHash, after loading. A nil RateLimiter behaves exactly
 // like a disabled one, so this field is safe to read before that wiring
 // happens.
+//
+// Requires names a flag that must be true for this command, and its
+// Subcommands, to exist in the tree at all, checked once at startup
+// by PruneDisabledCommands, see prune.go, called from main.go right
+// after command.LoadTreeStructure returns. This is left empty, the
+// default, for a command that is always available. This differs from
+// PasswordHash and Command Level's own PasswordHash above in kind,
+// not just in name: those gate whether a reachable command's own
+// RunFunc is allowed to execute, while Requires gates whether the
+// command is reachable, or even shown in help or tab completion, at
+// all. That distinction matters for a command whose whole reason to
+// exist depends on a feature being turned on, "password change" when
+// config.SystemConfig.EnableCLIAuthentication is false for instance,
+// where the right behavior is for the command not to exist rather
+// than to exist and refuse. See var/tree/level_user.yaml for this
+// project's own use of this field.
 type Command struct {
 	Desc         string `yaml:"desc"`
 	Help         string `yaml:"help"`
@@ -120,6 +136,7 @@ type Command struct {
 	MinArgs      *int   `yaml:"minargs"`
 	MaxArgs      *int   `yaml:"maxargs"`
 	MaxArgLength int    `yaml:"maxarglength"`
+	Requires     string `yaml:"requires"`
 
 	Subcommands map[string]*Command `yaml:"subcommands"`
 
@@ -207,6 +224,18 @@ type ResolveResult struct {
 // PasswordChangeMaxAttempts setting, the same retry ceiling shape
 // TOTPMaxAttempts above already uses.
 //
+// AuthProvider is the backend cmd/cmd_password.go's own
+// re-authentication step, checking the current password before a
+// change is allowed, checks a typed password against, see
+// auth.AuthProvider. This is the same value main.go built once,
+// through auth.NewAuthProvider, from config.SystemConfig's
+// AuthProviders and CLIAuthProvider settings, and already used for
+// the session's own original login, so a password change is checked
+// against whatever backend actually owns this account rather than
+// always assuming the local users.yaml database. This is nil if
+// EnableCLIAuthentication is off, since there is then no CLI login of
+// its own for any backend to have checked in the first place.
+//
 // Audit records what commands ran. It is nil-safe, see the Auditor
 // interface below, so this package does not need to import package
 // auditlog directly.
@@ -262,6 +291,7 @@ type AppContext struct {
 
 	PasswordPolicy            auth.PasswordPolicy
 	PasswordChangeMaxAttempts int
+	AuthProvider              auth.AuthProvider
 
 	Levels     *TreeStructure
 	Audit      Auditor

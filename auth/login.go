@@ -15,15 +15,15 @@ import (
 
 	"github.com/gotermme/routercli/i18n"
 
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 )
 
 // dummyBcryptHash - This constant is a fixed, valid bcrypt hash used
 // only to burn the same amount of CPU time a real password comparison
-// would, when VerifyLogin hits a nonexistent username. Its plaintext,
-// "not-a-real-password", is never compared against anything a real
-// user could type. Only its bcrypt cost factor matters here.
+// would, when LocalAuthProvider.Authenticate, see provider.go, hits a
+// nonexistent username. Its plaintext, "not-a-real-password", is
+// never compared against anything a real user could type. Only its
+// bcrypt cost factor matters here.
 const dummyBcryptHash = "$2a$10$C6UzMDM.H6dfI/f/IKcEeO4Sqzr4v4E4T0.E1TQhZY6NxN.0kQ8wa"
 
 // ErrLoginFailed - This variable is returned by PromptLogin once the
@@ -39,29 +39,19 @@ var ErrLoginFailed = errors.New("authentication failed")
 
 // VerifyLogin - This function is the actual login process, kept
 // separate from any terminal I/O so it can be unit tested without a
-// real tty. A nonexistent username and a wrong password intentionally
-// produce the exact same result through the boolean return. Anything
-// more specific, such as distinguishing "no such user" from "wrong
-// password", would tell an attacker which usernames are valid, a
-// classic login error message mistake.
-func VerifyLogin(users Users, username, password string) (*Session, bool) {
-	u, ok := users[username]
-	if !ok {
-		// A real bcrypt comparison still runs against a fixed dummy
-		// hash before returning, even though there is no real
-		// password to check here. Without this, a nonexistent
-		// username would return almost instantly, a map miss, while a
-		// real username with a wrong password takes bcrypt's real,
-		// deliberately slow comparison time. That difference would be
-		// a timing side channel letting an attacker enumerate valid
-		// usernames by measuring response time. Running the same
-		// costly comparison on this path normalizes the timing
-		// regardless of which branch is taken. The dummy hash's own
-		// password is never used or checked against anything real.
-		bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
-		return nil, false
-	}
-	if !VerifyPassword(u.PasswordHash, password) {
+// real tty. It delegates the actual credential check to provider,
+// see AuthProvider, so this function itself no longer needs to know
+// whether that check is against a local users.yaml, an LDAP
+// directory, or anything else. A nonexistent username and a wrong
+// password intentionally produce the exact same result through the
+// boolean return. Anything more specific, such as distinguishing "no
+// such user" from "wrong password", would tell an attacker which
+// usernames are valid, a classic login error message mistake, and
+// AuthProvider's own implementations, see LocalAuthProvider.Authenticate,
+// are written to preserve that property.
+func VerifyLogin(provider AuthProvider, username, password string) (*Session, bool) {
+	ok, err := provider.Authenticate(username, password)
+	if err != nil || !ok {
 		return nil, false
 	}
 	return &Session{Username: username, Authenticated: true}, true
@@ -69,15 +59,37 @@ func VerifyLogin(users Users, username, password string) (*Session, bool) {
 
 // PromptLogin - This function drives the interactive login prompts
 // for a username and password, reading the password with echo
-// disabled. If the matched user has a second factor configured, a
-// valid code for it is also required, read from the same bufio.Reader
-// created here rather than a fresh one. A right password with a wrong
-// or missing second factor code counts as a failed attempt, the same
-// as a wrong password. It is reported and audited identically, so an
-// attacker cannot distinguish a wrong password from a right password
-// with the wrong TOTP code. auditFail is called after every failed
-// attempt, not just the final one, so a caller can record each one
-// rather than only the attempt that ended the session.
+// disabled, checking the typed password with provider, see
+// AuthProvider. users is still needed alongside provider, since a
+// resolved identity's own second factor secret, and the TOTP prompt
+// that goes with it below, is always looked up in this project's own
+// users.yaml database regardless of which AuthProvider actually
+// checked the password; an AuthProvider such as a future LDAP or
+// RADIUS backend has no notion of a TOTP secret of its own. A
+// username provider authenticates that has no matching entry in
+// users, possible once a non-local AuthProvider is in play, is
+// treated as a real identity with no second factor configured rather
+// than an error, see the u == nil guard below.
+//
+// totpEnabled mirrors config.SystemConfig.EnableTOTPAuthentication.
+// When false, no second factor is ever requested here, even for a
+// user whose users.yaml entry has a TOTPSecret set, since that global
+// switch is meant to turn step-up authentication off deployment wide,
+// not merely to stop new second factors from being enrolled. See
+// cmd/cmd_totp.go, which is removed from the tree entirely, through
+// command's Requires field, when this same configuration flag is
+// off.
+//
+// If the matched user has a second factor configured and totpEnabled
+// is true, a valid code for it is also required, read from the same
+// bufio.Reader created here rather than a fresh one. A right password
+// with a wrong or missing second factor code counts as a failed
+// attempt, the same as a wrong password. It is reported and audited
+// identically, so an attacker cannot distinguish a wrong password
+// from a right password with the wrong TOTP code. auditFail is
+// called after every failed attempt, not just the final one, so a
+// caller can record each one rather than only the attempt that ended
+// the session.
 //
 // This function works even if the Translator is not set up.
 //
@@ -94,7 +106,7 @@ func VerifyLogin(users Users, username, password string) (*Session, bool) {
 // interactive prompt, or a scripted login flow, is worse than simply
 // ending the attempt and telling the caller how long to wait before
 // trying again.
-func PromptLogin(r io.Reader, w io.Writer, fd int, users Users, maxAttempts int, rateLimiter *KeyedRateLimiter, t *i18n.Translator, auditFail func(username string)) (*Session, error) {
+func PromptLogin(r io.Reader, w io.Writer, fd int, provider AuthProvider, users Users, totpEnabled bool, maxAttempts int, rateLimiter *KeyedRateLimiter, t *i18n.Translator, auditFail func(username string)) (*Session, error) {
 	reader := bufio.NewReader(r)
 
 	// With a real rate limiter, the lockout itself is what actually
@@ -132,10 +144,18 @@ func PromptLogin(r io.Reader, w io.Writer, fd int, users Users, maxAttempts int,
 			return nil, fmt.Errorf("error reading password: %v", err)
 		}
 
-		session, ok := VerifyLogin(users, username, string(passwordBytes))
+		session, ok := VerifyLogin(provider, username, string(passwordBytes))
 		if ok {
-			u := users[username] // Guaranteed to exist: VerifyLogin only returns ok=true for a real user.
-			if !SecondFactorRequired(u) {
+			u := users[username]
+			if u == nil {
+				// provider authenticated username, but this project's
+				// own users.yaml has no matching entry for it. This is
+				// expected once a non-local AuthProvider is in play,
+				// see this function's own doc comment, and simply
+				// means there is no second factor secret to check.
+				u = &User{Username: username}
+			}
+			if !totpEnabled || !SecondFactorRequired(u) {
 				if rateLimiter != nil {
 					rateLimiter.RecordSuccess(username)
 				}

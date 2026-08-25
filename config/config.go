@@ -133,6 +133,11 @@ func DefaultSystemConfig() SystemConfig {
 		PasswordRequireNumbers:      false,
 		PasswordRequireSpecialChars: false,
 		PasswordChangeMaxAttempts:   3,
+		EnableHostAuthentication:    false,
+		EnableCLIAuthentication:     true,
+		EnableTOTPAuthentication:    true,
+		AuthProviders:               []AuthProviderConfig{{Name: "local", Type: "local"}},
+		CLIAuthProvider:             "local",
 	}
 }
 
@@ -247,6 +252,51 @@ func (c SystemConfig) validate() error {
 	}
 	if err := validateAttemptWindowPair("CommandPassword", c.CommandPasswordAttemptWindow, c.CommandPasswordLockoutDuration); err != nil {
 		return err
+	}
+
+	if err := c.validateAuthSources(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateAuthSources - This method checks the settings introduced
+// for authenticating over more than one path, an interactive login,
+// a trusted host identity, or both together, plus an optional TOTP
+// step up on top of either. See validate's own doc comment for why a
+// bad configuration is rejected here rather than left to fail in a
+// more confusing way once the program is already running.
+func (c SystemConfig) validateAuthSources() error {
+	if c.AuthRequired && !c.EnableHostAuthentication && !c.EnableCLIAuthentication {
+		return fmt.Errorf("AuthRequired is true but neither EnableHostAuthentication nor EnableCLIAuthentication is set, so there is no way to establish a session's identity")
+	}
+
+	if c.EnableTOTPAuthentication && !c.EnableHostAuthentication && !c.EnableCLIAuthentication {
+		return fmt.Errorf("EnableTOTPAuthentication cannot stand alone, it requires EnableHostAuthentication or EnableCLIAuthentication to also be true")
+	}
+
+	seenNames := make(map[string]bool, len(c.AuthProviders))
+	for _, p := range c.AuthProviders {
+		if p.Name == "" {
+			return fmt.Errorf("AuthProviders entry has an empty name")
+		}
+		if p.Type == "" {
+			return fmt.Errorf("AuthProviders entry %q has an empty type", p.Name)
+		}
+		if seenNames[p.Name] {
+			return fmt.Errorf("AuthProviders has more than one entry named %q", p.Name)
+		}
+		seenNames[p.Name] = true
+	}
+
+	if c.EnableCLIAuthentication {
+		if c.CLIAuthProvider == "" {
+			return fmt.Errorf("EnableCLIAuthentication is true but CLIAuthProvider is empty")
+		}
+		if !seenNames[c.CLIAuthProvider] {
+			return fmt.Errorf("CLIAuthProvider %q does not match any entry in AuthProviders", c.CLIAuthProvider)
+		}
 	}
 
 	return nil

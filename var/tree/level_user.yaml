@@ -6,6 +6,7 @@
 commands:
   totp:
     desc_key: totp.desc
+    requires: totp
     subcommands:
       enable:
         desc_key: totp.enable.desc
@@ -30,6 +31,7 @@ commands:
 
   password:
     desc_key: user.password.desc
+    requires: password_change
     subcommands:
       change:
         desc_key: password.change.desc

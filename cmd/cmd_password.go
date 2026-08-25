@@ -81,7 +81,7 @@ func runPasswordChange(ctx *command.AppContext, args []string) error {
 					return err
 				}
 			}
-			if !verifyReauth(user, password, code, time.Now()) {
+			if !verifyReauth(ctx.AuthProvider, user, password, code, time.Now()) {
 				fmt.Println(ctx.Translator.T("password.change.denied"))
 				printPasswordChangeRetry(ctx, maxAttempts, attempt)
 				continue
@@ -138,20 +138,32 @@ func printPasswordChangeRetry(ctx *command.AppContext, maxAttempts, attempt int)
 	}
 }
 
-// verifyReauth - This function checks password and, when
-// auth.SecondFactorRequired(user) is true, code, against user's
-// already stored credentials. now is threaded through as a parameter
-// rather than read with time.Now() here, the same reason
-// finishTOTPEnable and finishTOTPDisable in cmd_totp.go take it, so a
-// test can pass a fixed instant alongside a code generated for that
-// same instant. A right password with a wrong or missing second
-// factor code is reported and treated identically to an outright
-// wrong password, the same reasoning auth.PromptLogin already
-// documents for its own login attempt, so an attacker watching the
-// response cannot tell a correct password with a wrong TOTP code from
-// a wrong password.
-func verifyReauth(user *auth.User, password, code string, now time.Time) bool {
-	if !auth.VerifyPassword(user.PasswordHash, password) {
+// verifyReauth - This function checks password, through provider, see
+// auth.AuthProvider, and, when auth.SecondFactorRequired(user) is
+// true, code, against user's already stored credentials. Routing the
+// password check through provider rather than calling
+// auth.VerifyPassword against user.PasswordHash directly, the way
+// this function worked before AuthProvider existed, means a password
+// change re-authenticates against whichever backend actually owns
+// this account, local, or an LDAP or a RADIUS directory once one
+// exists, the same backend that checked the session's own original
+// login. The second factor step below is deliberately left
+// unconditional on which provider is in play: a TOTP secret, when one
+// is enrolled, always lives in this project's own users.yaml and is
+// always checked the same way regardless of where the password itself
+// was verified, see auth.PromptLogin's own doc comment for the same
+// reasoning. now is threaded through as a parameter rather than read
+// with time.Now() here, the same reason finishTOTPEnable and
+// finishTOTPDisable in cmd_totp.go take it, so a test can pass a
+// fixed instant alongside a code generated for that same instant. A
+// right password with a wrong or missing second factor code is
+// reported and treated identically to an outright wrong password, the
+// same reasoning auth.PromptLogin already documents for its own login
+// attempt, so an attacker watching the response cannot tell a correct
+// password with a wrong TOTP code from a wrong password.
+func verifyReauth(provider auth.AuthProvider, user *auth.User, password, code string, now time.Time) bool {
+	ok, err := provider.Authenticate(user.Username, password)
+	if err != nil || !ok {
 		return false
 	}
 	if auth.SecondFactorRequired(user) {

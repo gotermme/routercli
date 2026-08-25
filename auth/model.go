@@ -117,11 +117,29 @@ type KeyedRateLimiter struct {
 // revert to the base level once that much time has passed, the CLI
 // equivalent of a privileged mode timeout. It is meaningless, and not
 // read, while the session is at the base level.
+//
+// HostUsername and HostConnectedAt are set only when
+// config.SystemConfig.EnableHostAuthentication trusted an operating
+// system account identity to reach this session, see
+// SessionFromHostIdentity. HostUsername is that account's own name,
+// which is not necessarily Username: when EnableCLIAuthentication is
+// also on, reached over a shared account for instance, Username ends
+// up being whichever identity the CLI login itself resolved to, while
+// HostUsername stays the underlying OS account the connection
+// actually arrived as. HostConnectedAt is when that OS identity was
+// established, which can meaningfully predate Username being set at
+// all, if a slow or repeatedly failed CLI login followed it. Both are
+// their zero values, an empty string and a zero time.Time, when
+// EnableHostAuthentication was never in play for this session, and
+// main.go's audit log entry for a new session includes both only in
+// that case. See main.go's establishSession.
 type Session struct {
 	Username              string
 	Authenticated         bool
 	CommandLevel          string
 	CommandLevelEnteredAt time.Time
+	HostUsername          string
+	HostConnectedAt       time.Time
 }
 
 // User - This type represents one entry in the user database.
@@ -178,9 +196,47 @@ const (
 	PasswordViolationNeedsSpecialChar PasswordViolation = "needs_special_char"
 )
 
+// AuthProvider - This type is the seam every backend that can check a
+// typed username and password plugs into: today only LocalAuthProvider,
+// bcrypt hashes in a Users database, with an LDAP or a RADIUS backend
+// the kind of thing expected to implement this same interface later
+// without VerifyLogin, PromptLogin, or cmd/cmd_password.go's own
+// reauthentication step needing to change at all. See
+// config.SystemConfig.AuthProviders for how a deployment names which
+// backend, of which kind, it wants, and NewAuthProvider for how a
+// name there becomes a real value of this type.
+//
+// Authenticate reports whether password is correct for username. A
+// non-nil error means the check itself could not be completed, a
+// network failure reaching a remote directory for instance, distinct
+// from ok being false for a password that was actually wrong. A
+// caller such as VerifyLogin treats either an error or ok being false
+// as a failed login, exactly the same as it always has, since neither
+// case should ever let a session through.
+type AuthProvider interface {
+	Authenticate(username, password string) (bool, error)
+}
+
+// LocalAuthProvider - This type is the AuthProvider backed by this
+// project's own etc/users.yaml, or whatever a project renames its own
+// UsersFile to, checking a candidate password against the matching
+// User's own PasswordHash with VerifyPassword. This is what every
+// deployment used before AuthProvider existed at all, so it stays the
+// default entry in config.DefaultSystemConfig's own AuthProviders
+// list, keeping every existing deployment's behavior unchanged.
+type LocalAuthProvider struct {
+	Users Users
+}
+
 // ----------------------------------------------------------------------
 // Initialization Functions
 // ----------------------------------------------------------------------
+
+// NewLocalAuthProvider - This function constructs a LocalAuthProvider
+// checking candidate passwords against users.
+func NewLocalAuthProvider(users Users) *LocalAuthProvider {
+	return &LocalAuthProvider{Users: users}
+}
 
 // NewRateLimiter - This function constructs a RateLimiter.
 // maxAttempts at or below zero disables rate limiting entirely. See
