@@ -273,7 +273,7 @@ func main() {
 			ctx.AuthProvider = provider
 		}
 
-		session, err := establishSession(config, users, ctx.AuthProvider, translator, audit)
+		session, err := establishSession(config, users, ctx.AuthProvider, translator, audit, os.Stdin, os.Stdout)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\n%", translator.T("auth.access_denied"))
 			os.Exit(1)
@@ -385,7 +385,21 @@ func main() {
 // its CLI login path, now also covering the standalone host-plus-TOTP
 // step up, which had no login attempt of its own to audit before this
 // function existed.
-func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.AuthProvider, translator *i18n.Translator, audit *auditlog.AuditLog) (*auth.Session, error) {
+//
+// stdin and stdout are taken as explicit parameters, rather than this
+// function simply reading the process-wide os.Stdin and os.Stdout
+// itself, for the same reason auth.PromptLogin and its siblings
+// already take an explicit io.Reader, io.Writer, and fd rather than
+// assuming a global. main's own one real call site passes os.Stdin
+// and os.Stdout, unchanged behavior. A test, in contrast, can hand
+// this the slave end of a real pseudo terminal, github.com/creack/pty
+// in this project's own test suite, so the masked password and TOTP
+// code reads below have a genuine terminal device to operate against,
+// the same requirement golang.org/x/term itself has, without needing
+// to mutate the os.Stdin package variable for the duration of the
+// test. See main_test.go's own pty helper for where this is put to
+// use.
+func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.AuthProvider, translator *i18n.Translator, audit *auditlog.AuditLog, stdin, stdout *os.File) (*auth.Session, error) {
 	var hostSession *auth.Session
 	if cfg.EnableHostAuthentication {
 		s, err := auth.SessionFromHostIdentity()
@@ -409,7 +423,7 @@ func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.A
 			loginRateLimiter = auth.NewKeyedRateLimiter(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow.AsDuration(), cfg.LoginLockoutDuration.AsDuration())
 		}
 
-		cliSession, err := auth.PromptLogin(os.Stdin, os.Stdout, int(os.Stdin.Fd()), provider, users, cfg.EnableTOTPAuthentication, cfg.LoginMaxAttempts, loginRateLimiter, translator,
+		cliSession, err := auth.PromptLogin(stdin, stdout, int(stdin.Fd()), provider, users, cfg.EnableTOTPAuthentication, cfg.LoginMaxAttempts, loginRateLimiter, translator,
 			func(username string) { audit.Log(username, "LOGIN", false) })
 		if err != nil {
 			return nil, err
@@ -435,10 +449,10 @@ func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.A
 			u = &auth.User{Username: hostSession.Username}
 		}
 		if auth.SecondFactorRequired(u) {
-			reader := bufio.NewReader(os.Stdin)
+			reader := bufio.NewReader(stdin)
 			verified := false
 			for attempt := 1; attempt <= cfg.LoginMaxAttempts; attempt++ {
-				if auth.VerifySecondFactor(os.Stdout, reader, int(os.Stdin.Fd()), u, translator) {
+				if auth.VerifySecondFactor(stdout, reader, int(stdin.Fd()), u, translator) {
 					verified = true
 					break
 				}
@@ -834,9 +848,15 @@ func logSessionEnd(ctx *command.AppContext) {
 // password once, with echo disabled, and prints the "$6$..." hash to
 // stdout so it can be redirected or copied straight into the YAML
 // file.
-func runHashPasswordUtility() {
+//
+// stdin is taken as an explicit parameter rather than this function
+// reading the process-wide os.Stdin itself, the same reasoning
+// establishSession's own doc comment gives, so a test can hand this
+// the slave end of a real pseudo terminal instead of a real password
+// prompt requiring an actual interactive session.
+func runHashPasswordUtility(stdin *os.File) {
 	fmt.Fprint(os.Stderr, "Password: ")
-	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	pwBytes, err := term.ReadPassword(int(stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error reading password:", err)
@@ -866,7 +886,16 @@ func runHashPasswordUtility() {
 // immediately, while the terminal is still open, instead of leaving
 // an administrator to discover it days later when the user actually
 // tries to log in.
-func runTOTPSetupUtility(configPath, username string) {
+//
+// stdin is taken as an explicit parameter, rather than this function
+// reading the process-wide os.Stdin itself, so a test can supply the
+// confirmation code through an ordinary io.Reader. Unlike
+// establishSession and runHashPasswordUtility, this one reads its
+// confirmation code with plain, echoed input, see the reader.ReadString
+// call below, not through term.ReadPassword, so no real terminal
+// device is actually required here, an in-memory strings.Reader is
+// enough.
+func runTOTPSetupUtility(configPath, username string, stdin io.Reader) {
 	config, err := config.LoadSystemConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to load configuration:", err)
@@ -896,7 +925,7 @@ func runTOTPSetupUtility(configPath, username string) {
 	fmt.Println()
 	fmt.Print("Now enter the 6-digit code your app is showing, to confirm: ")
 
-	reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(stdin)
 	codeLine, _ := reader.ReadString('\n')
 	code := strings.TrimSpace(codeLine)
 
@@ -1119,13 +1148,13 @@ func processCommandLineFlags() (configFile string, checkConfig bool) {
 	// If the hashpassword flag was given, run
 	// runHashPasswordUtility and exit.
 	if *bOptHashPassword {
-		runHashPasswordUtility()
+		runHashPasswordUtility(os.Stdin)
 		os.Exit(0)
 	}
 
 	// If the mfa flag was given, run runTOTPSetupUtility and exit.
 	if *sOptTOTPSetup != "" {
-		runTOTPSetupUtility(*sOptConfigFilename, *sOptTOTPSetup)
+		runTOTPSetupUtility(*sOptConfigFilename, *sOptTOTPSetup, os.Stdin)
 		os.Exit(0)
 	}
 

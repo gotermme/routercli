@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"os/user"
@@ -554,5 +555,241 @@ func TestPrintOutputHeaderIncludesBuildWhenSet(t *testing.T) {
 	out := captureStdout(t, printOutputHeader)
 	if !strings.Contains(out, "test-build-123") {
 		t.Errorf("printOutputHeader output = %q, expected it to contain the Build string %q", out, "test-build-123")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// recordingAuditor
+//
+// ----------------------------------------------------------------------
+
+// recordingAuditor - This type is a minimal command.Auditor test
+// double, used by logSessionEnd's own tests below and by
+// main_pty_test.go's runLoop tests, for asserting on which entries
+// were actually written without standing up a real *auditlog.AuditLog
+// backed by a file on disk every time. would controls what WouldLog
+// reports, mimicking a real AuditLog's own enabled flag, see
+// auditlog.AuditLog.WouldLog's own doc comment for why runLoop
+// snapshots it both before and after running a command. Log and
+// ForceLog both simply record every call they receive, ForceLog
+// unconditionally, Log only records the command text, mirroring the
+// one distinction between the two that matters for the tests that use
+// this type, ForceLog is the one logSessionEnd, and a command's own
+// audit entry once WouldLog was true either before or after it ran,
+// always actually writes.
+type recordingAuditor struct {
+	would   bool
+	entries []string
+}
+
+func (r *recordingAuditor) Log(username, command string, success bool) {
+	r.entries = append(r.entries, command)
+}
+
+func (r *recordingAuditor) WouldLog() bool { return r.would }
+
+func (r *recordingAuditor) ForceLog(username, command string, success bool) {
+	r.entries = append(r.entries, command)
+}
+
+// hasEntry - This method reports whether any recorded entry equals
+// want exactly, used instead of a plain slice comparison so a test
+// asserting on one particular entry does not need to know, or care
+// about, every other entry recordingAuditor may have collected along
+// the way.
+func (r *recordingAuditor) hasEntry(want string) bool {
+	for _, e := range r.entries {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+// ----------------------------------------------------------------------
+//
+// logSessionEnd
+//
+// ----------------------------------------------------------------------
+
+// TestLogSessionEndWritesForceLogWithSessionUsername - This test
+// verifies that logSessionEnd writes exactly one "SESSION END" entry,
+// through ForceLog rather than Log, using ctx.Session.Username.
+func TestLogSessionEndWritesForceLogWithSessionUsername(t *testing.T) {
+	audit := &recordingAuditor{}
+	ctx := &command.AppContext{Audit: audit, Session: &auth.Session{Username: "alice"}}
+
+	logSessionEnd(ctx)
+
+	if !audit.hasEntry("SESSION END") {
+		t.Errorf("expected a \"SESSION END\" entry, got %v", audit.entries)
+	}
+}
+
+// TestLogSessionEndUsesEmptyUsernameWhenSessionNil - This test
+// verifies that logSessionEnd does not panic when ctx.Session is nil,
+// the state main.go leaves ctx in in should this function ever be
+// reached before a session was constructed, and still writes its
+// SESSION END entry, with an empty username rather than one read off
+// a nil pointer.
+func TestLogSessionEndUsesEmptyUsernameWhenSessionNil(t *testing.T) {
+	audit := &recordingAuditor{}
+	ctx := &command.AppContext{Audit: audit}
+
+	logSessionEnd(ctx)
+
+	if !audit.hasEntry("SESSION END") {
+		t.Errorf("expected a \"SESSION END\" entry even with a nil Session, got %v", audit.entries)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// runTOTPSetupUtility
+//
+// ----------------------------------------------------------------------
+
+// TestRunTOTPSetupUtilitySuccess - This test verifies the success
+// path of runTOTPSetupUtility, the --mfa flag's own implementation.
+// runTOTPSetupUtility generates its own fresh secret internally and
+// prints it before ever reading the confirmation code, so this test
+// runs the call on its own goroutine, reading its streamed stdout
+// itself, on this same goroutine, rather than through a second reader
+// racing it, to recover that freshly generated secret the moment it
+// appears, computing a live code for it with auth.GenerateTOTPCode,
+// and only then supplying that code on stdin. Reading and writing
+// both happen on this one goroutine because the alternative, calling
+// runTOTPSetupUtility inline and reading its output only after it
+// returns, cannot work here at all: it would still be blocked
+// printing, and waiting on stdin, while this goroutine was still
+// blocked waiting for it to return before ever looking at what it
+// printed, a producer and consumer shaped deadlock. This relies on
+// etc/routercli.yaml existing relative to the test binary's own
+// working directory, the same assumption this project's own
+// --check-config smoke testing already makes.
+func TestRunTOTPSetupUtilitySuccess(t *testing.T) {
+	if _, err := os.Stat("etc/routercli.yaml"); err != nil {
+		t.Skipf("etc/routercli.yaml not found relative to the test working directory, skipping: %v", err)
+	}
+
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create a stdout pipe: %v", err)
+	}
+	stdinR, stdinW := io.Pipe()
+
+	doneCh := make(chan struct{})
+	go func() {
+		real := os.Stdout
+		os.Stdout = stdoutW
+		runTOTPSetupUtility("etc/routercli.yaml", "alice", stdinR)
+		os.Stdout = real
+		stdoutW.Close()
+		close(doneCh)
+	}()
+
+	// One single reader drains stdoutR for the whole test, both to
+	// find the secret line and, afterward, to collect the rest of the
+	// output, since a second, independent reader started later would
+	// race this one over the same pipe and each would only see part of
+	// the stream.
+	var soFar bytes.Buffer
+	buf := make([]byte, 4096)
+	readMore := func(t *testing.T) bool {
+		t.Helper()
+		n, rerr := stdoutR.Read(buf)
+		if n > 0 {
+			soFar.Write(buf[:n])
+		}
+		return rerr == nil
+	}
+	findSecret := func() string {
+		for _, line := range splitLines(soFar.String()) {
+			if trimmed := strings.TrimSpace(line); isBase32SecretLine(trimmed) {
+				return strings.ReplaceAll(trimmed, " ", "")
+			}
+		}
+		return ""
+	}
+
+	var secret string
+	deadline := time.Now().Add(5 * time.Second)
+	for secret == "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for runTOTPSetupUtility to print its TOTP secret, output so far:\n%s", soFar.String())
+		}
+		if !readMore(t) {
+			break
+		}
+		secret = findSecret()
+	}
+	if secret == "" {
+		t.Fatalf("runTOTPSetupUtility never printed a manually enterable secret, output so far:\n%s", soFar.String())
+	}
+
+	code, cerr := auth.GenerateTOTPCode(secret, time.Now())
+	if cerr != nil {
+		t.Fatalf("GenerateTOTPCode returned error: %v", cerr)
+	}
+	fmt.Fprintln(stdinW, code)
+	stdinW.Close()
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runTOTPSetupUtility did not return after a valid confirmation code was supplied")
+	}
+	for readMore(t) {
+		// drain whatever remains until stdoutW.Close, above, produces EOF
+	}
+
+	full := soFar.String()
+	if !strings.Contains(full, "Confirmed") {
+		t.Errorf("expected runTOTPSetupUtility's output to confirm success, got:\n%s", full)
+	}
+	if !strings.Contains(full, secret) {
+		t.Errorf("expected runTOTPSetupUtility's output to print the totp_secret line for %q, got:\n%s", secret, full)
+	}
+}
+
+// isBase32SecretLine - This function reports whether trimmed looks
+// like the manually enterable secret line
+// auth.FormatTOTPSecretForDisplay produces, base32 alphabet
+// characters and spaces only, long enough to actually be a secret
+// rather than some other short, coincidentally base32-shaped word
+// runTOTPSetupUtility's surrounding text might contain.
+func isBase32SecretLine(trimmed string) bool {
+	if trimmed == "" || len(trimmed) < 16 {
+		return false
+	}
+	for _, r := range trimmed {
+		if r == ' ' {
+			continue
+		}
+		if (r < 'A' || r > 'Z') && (r < '2' || r > '7') {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRunTOTPSetupUtilityWrongCodeExits - This test verifies the
+// failure path of runTOTPSetupUtility through main's own subprocess
+// helper, see main_subprocess_test.go, since a rejected confirmation
+// code calls os.Exit(1) directly, ending the real test process if
+// called in process the way TestRunTOTPSetupUtilitySuccess does
+// above. See runMainAsSubprocess's own doc comment for why this is
+// the accepted way to test an os.Exit call site at all.
+func TestRunTOTPSetupUtilityWrongCodeExits(t *testing.T) {
+	if _, err := os.Stat("etc/routercli.yaml"); err != nil {
+		t.Skipf("etc/routercli.yaml not found relative to the test working directory, skipping: %v", err)
+	}
+	stdout, stderr, code := runMainAsSubprocessWithStdin(t, "", strings.NewReader("000000\n"), "--mfa", "alice")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 for a rejected confirmation code, stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "did not verify") {
+		t.Errorf("expected stderr to explain the code did not verify, got %q", stderr)
 	}
 }
