@@ -194,6 +194,26 @@ every node that does not set it. This makes `nil` unambiguous.
 This property sets the maximum length, in runes, that is allowed for any single
 argument, enforced the same way as `minargs` and `maxargs`.
 
+#### `requires`
+
+This property names a feature flag that must be true for this command, and
+its subcommands, to exist in the tree at all. It is checked once at startup
+by `PruneDisabledCommands`, called from `main.go` right after the tree
+structure is loaded. The default is empty, meaning the command is always
+available. This differs from `password_hash` above in kind, not just in
+name. `password_hash` gates whether a reachable command's own action is
+allowed to run, while `requires` gates whether the command is reachable, or
+even shown in help or tab completion, at all. That distinction matters for a
+command whose whole reason to exist depends on a feature being turned on,
+`password change` when `EnableCLIAuthentication` is `false` in
+`etc/routercli.yaml` for instance, where the right behavior is for the
+command not to exist rather than to exist and refuse.
+
+The flag names checked today are `totp`, tied to `EnableTOTPAuthentication`,
+and `password_change`, tied to `EnableCLIAuthentication`. See
+`var/tree/level_user.yaml` for both in real use, and `etc/README.md` for
+what each of those `routercli.yaml` settings does.
+
 #### `subcommands`
 
 This property lists the nested subcommands reachable from this command.

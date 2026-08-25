@@ -43,6 +43,31 @@ AuthRequired: false
 UsersFile: etc/users.yaml
 LoginMaxAttempts: 3
 #
+# EnableHostAuthentication and EnableCLIAuthentication are the two
+# sources a session's identity can come from, and at least one MUST be
+# true whenever AuthRequired is true. EnableHostAuthentication trusts
+# the operating system account routercli is already running as, meant
+# for a deployment reached over SSH where sshd authenticated the Unix
+# account before routercli ever started. EnableCLIAuthentication runs
+# routercli's own interactive username and password login. Both may be
+# true together, see etc/README.md for what that combination means.
+EnableHostAuthentication: false
+EnableCLIAuthentication: true
+#
+# EnableTOTPAuthentication is the system-wide switch for a second
+# factor on top of whichever of the two flags above identifies the
+# account. It cannot stand alone, see etc/README.md.
+EnableTOTPAuthentication: true
+#
+# AuthProviders names every authentication backend this deployment has
+# configured. Only the "local" type, bcrypt hashes in UsersFile, has a
+# real implementation today. CLIAuthProvider names which entry
+# EnableCLIAuthentication's own login prompt checks a password against.
+AuthProviders:
+  - name: local
+    type: local
+CLIAuthProvider: local
+#
 # LoginAttemptWindow and LoginLockoutDuration are both disabled (0) by
 # default, matching RouterCLI's original flat maxAttempts behavior.
 # Uncomment both together, never just one, see etc/README.md, to opt

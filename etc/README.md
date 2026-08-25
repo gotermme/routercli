@@ -4,129 +4,130 @@ This directory holds the RouterCLI configuration file (`routercli.yaml`) and
 the multi-user login database (`users.yaml`).
 
 
-## routercli.yaml
+## Properties for the routercli.yaml YAML file
 
-This is the main configuration file for RouterCLI itself, loaded from the
-path given via `--config`/`-c` (default `etc/routercli.yaml`). A missing
-file is not an error. `DefaultSystemConfig()` is used instead. Unknown
-keys are an error, so a typo in this file fails loudly at startup rather
-than being silently ignored.
+This is the main configuration file for RouterCLI, loaded from the path given via `--config`/`-c` (default `etc/routercli.yaml`). A missing file is not an error as the values found in `DefaultSystemConfig()` are used instead. Unknown keys are an error, so a typo in this file fails loudly at startup rather than being silently ignored.
 
-### Properties for YAML File
+All fields are optional; every field not set falls back to the default shown below.
 
-All fields are optional; every field not set falls back to the default
-shown below.
+### Security Settings
 
 #### `PreventEscape` 
 
-This property attempts to prevent a user from being able to escape the CLI. The
-default is `false`. When `true` RouterCLI ignores SIGINT, SIGTSTP, SIGQUIT, and
-SIGTERM at the OS level, so Ctrl-C, Ctrl-Z (suspend), Ctrl-\, and a plain `kill
-<pid>` cannot stop or background the process. It also changes the read loop so
-Ctrl-C does nothing observable and Ctrl-D no longer ends the session; it
-instead prints "Use 'exit' to leave." and keeps reading. The only way out
-becomes the `exit` command itself. NOTE: SIGKILL and SIGSTOP cannot be blocked
-or ignored by any process, on any OS, in any language. That is a kernel
-guarantee, not a gap in this implementation.
+This property attempts to prevent a user from being able to escape the CLI. The default is `false`. When set to `true` RouterCLI will ignore **SIGINT**, **SIGTSTP**, **SIGQUIT**, and **SIGTERM** at the OS level, so `Ctrl-C`, `Ctrl-Z` (suspend), `Ctrl-\`, and a plain `kill <pid>` cannot stop or background the process. It also changes the read loop so `Ctrl-C` does nothing observable and `Ctrl-D` no longer ends the session; it instead prints "Use 'exit' to leave." and keeps reading. The only way out becomes the `exit` command. NOTE: **SIGKILL** and **SIGSTOP** cannot be blocked or ignored by any process, on any OS, in any language. That is a kernel guarantee, not a gap in this implementation.
+
+### Logging Support
 
 #### `LogLevel`
 
-This property defines the logging level, on of `0`, `1`, `3`, or `5`, and any
-other value is a hard error at startup. The default is `0`. `1` enables `error`
-and `info`. `3` also enables `warn`. `5` also enables `debug`. The
-`ROUTERCLI_DEBUG` environment variable enables `debug` logging for a one time
-run regardless of this setting.
+This property defines the following logging levels, of `0`, `1`, `3`, or `5`, and any other value is a hard error at startup. The default is `0`. A value of `1` enables `error` and `info`, a value of `3` also enables `warn`, and a value of `5` also enables `debug`. The `ROUTERCLI_DEBUG` environment variable enables `debug` logging for a one time run regardless of this setting.
 
 #### `LogFile`
 
-This is the path and filename for system logs. The default logging location is
-STDERR.  Set this property to send system log messages to a file instead of the
-terminal. In production this matters, especially once PreventEscape and
-AuthRequired are in real use, since STDERR is not necessarily something an
-operator is monitoring in real-time. The file is opened in append mode. If it
-cannot be opened, due to a bad path or permissions, RouterCLI falls back to
-STDERR and prints a warning there explaining why, rather than failing to start
-over a logging setting. See main.go.
+This is the path and filename for the main RouterCLI system log file. The default is **STDERR**. Set this property to send system log messages to a file instead of the terminal. In a production system this matters, especially once `PreventEscape` and `AuthRequired` are in use, as it is unlikely that an operator will be monitoring **STDERR**. This file is opened in append only mode. If for some reason it cannot be opened, due to a bad path or permissions issue, RouterCLI will fall back to **STDERR** and will print a warning to **STDERR** explaining why, rather than failing to start.
 
 #### `HistoryFile`
 
-This is the path and filename to the readline history file. The default is
-`var/log/history.log`.
+This is the path and filename to the readline history file. The default is `var/log/history.log`.
 
 #### `AuditLogFile`
 
-This is the path and filename to the audit log file. The default is
-`var/log/audit.log`.
+This is the path and filename to the audit log file. The default is `var/log/audit.log`.
 
 #### `AuditLogEnabled`
 
-This property enables the audit log at startup. The default is `false`.
-This only controls the starting state. It can be toggled at runtime, depending
-on your implementation, with something like `audit-log enable` and `audit-log
-disable` regardless of this setting (in the example these are only reachable
-once a session has moved past the base Command Level, see
-`var/tree/README.md`).
+This property enables the audit log at startup. The default is `false`. This only controls the starting state as audit logging can be toggled at runtime regardless of this setting, but depending on your implementation, with something like `audit-log enable` and `audit-log disable`.
+
+### Internationalization Support
 
 #### `CurrentLanguage`
 
-This property defines the current and active language used in the CLI. The
-default is `en`. The value of this property is this language code
-(e.g., `en` for English and `fr` for French). It is critical that these code
-match the language catalog's filename in the `LanguageDir`. If the requested code has no matching catalog it falls back to the default language.
+This property defines the current and active language that is being used by the CLI. The default is `en`. The value of this property is this language code (e.g., `en` for English and `fr` for French). It is critical that these code match the language catalog's filename in the `LanguageDir`. If the requested code has no matching catalog it falls back to the `DefaultLanguage`.
 
 #### `DefaultLanguage`
 
-This property defines the default or fallback language that should be used when
-the current language's catalog is missing a string. The default is `en`.
-This is deliberately a separate setting from `CurrentLanguage`, since an
-operator running the CLI in `fr` with an incomplete French catalog should fall
-back to specific and defined language (e.g., `en`).
+This property defines the default or fallback language that should be used when the current language's catalog is missing a string. The default is `en`. This is deliberately a separate setting from `CurrentLanguage`, since an operator running the CLI in `fr` with an incomplete French catalog should be able to fall back to specific and defined language (e.g., `en`).
 
 #### `LanguageDir`
 
-The location of the language catalog(`*.yaml`) files. The default is `var/lang`.
-Empty or missing is fine, since the language catalog is entirely optional, and
-any translated text simply falls back to its raw key, shown bracketed as 
-`[[show.desc]]`, if no catalogs are loaded at all.
+The location of the language catalog (`*.yaml`) files. The default is `var/lang`. Empty or missing is fine, since the language catalog is entirely optional, and any translated text simply falls back to its raw key, shown bracketed as `[[show.desc]]`, if no catalogs are loaded.
+
+### Timeouts
 
 #### `SessionIdleTimeout`
 
-This property defines how long the read loop needs to wait for a line of input
-before giving up and ending the current session entirely (e.g. `10m` or `30s`)
-using Go duration syntax. Zero disables it. The default is `0` (disabled).
+This property defines how long the read loop needs to wait for a line of input before giving up and ending the current session entirely (e.g. `10m` or `30s`), using the Go duration syntax. Zero disables it. The default is `0` (disabled).
 
 #### `ElevationTimeout`
 
-This property defines how long a session stays at a non-base Command Level
-before automatically reverting to the base level (e.g., `5m`) using Go duration
-syntax. Checked once per read loop iteration, so a session sitting idle past
-this timeout is demoted the next time any line is entered, not through a
-background timer, since there is nothing useful to do about it before the user
-interacts again anyway. The default is `0` (disabled).
+This property defines how long a session stays at a non-base Command Level before automatically reverting to the base level (e.g., `5m`), using the Go duration syntax. Checked once per read loop iteration, so a session sitting idle past this timeout is demoted the next time any line is entered, not through a background timer, since there is nothing useful to do before the user interacts with the CLI again anyway. The default is `0` (disabled).
+
+### Command Tree Settings
 
 #### `TreeStructure`
 
-This is the path and filename to the Tree Structure manifest file. The default
-is `var/tree/tree_structure.yaml`. See `var/tree/README.md` for its full
-schema.
+This is the path and filename to the tree structure manifest file. The default is `var/tree/tree_structure.yaml`. See `var/tree/README.md` for its full schema.
 
 #### `CommonTreeFile`
 
-This is the path and filename to the file defining the commands common to every
-Command Level (i.e., `help`, `exit`, `end`) that will be merged into every
-level at load time unless that level sets `skip_common`. The default is
-`var/tree/level_common.yaml`.
+This is the path and filename to the file defining the commands common to every Command Level (i.e., `help`, `exit`, `end`). These will be merged into every level at load time unless that level sets `skip_common`. The default is `var/tree/level_common.yaml`.
+
+### Authentication Settings
 
 #### `AuthRequired`
 
-This property determines whether a login prompt runs before the command loop
-starts. The default is `false`. `false` means the initial session login prompt
-never runs, and every session simply stays unauthenticated. This is independent
-of any Command Level or Command specific authentication requirements defined in
-the `password_hash` property for those Command Levels and Commands
-(see `var/tree/README.md`). A Command Level's own `password_hash`, or an
-individual Command's own `password_hash`, works exactly the same whether
-`AuthRequired` is `true` or `false`.
+This property determines whether a login prompt runs before the command loop starts. The default is `false`. When set to `false` the initial session login prompt never runs, and every session simply stays unauthenticated. This is independent of any Command Level or Command specific authentication requirements defined in the `password_hash` property for those Command Levels and Commands (see `var/tree/README.md`). A Command Level's own `password_hash`, or an individual Command's own `password_hash`, works exactly the same whether `AuthRequired` is `true` or `false`. Setting `AuthRequired` to `true` while both `EnableHostAuthentication` and `EnableCLIAuthentication` below are `false` is a hard error at startup, since there would then be no way to establish a session's identity.
+
+#### `EnableHostAuthentication`
+
+This property will use the the identity of the user that is running RouterCLI as the authenticated user in RouterCLI. RouterCLI gets this information from the standard library's os/user.Current. This does not invoke a password check and that took place via the Operating System. The default is `false`. This is primarily used for a deployment that reached over an SSH session, where the user's shell is set to run RouterCLI and the authentication is handled by `sshd`.
+
+#### `EnableCLIAuthentication`
+
+This property will use RouterCLI's own interactive username and password login prompt, checked against whichever provider `CLIAuthProvider` is named below. The default is `true`. `EnableHostAuthentication` and `EnableCLIAuthentication` are not mutually exclusive. Both can be `true` and would be used in a scenario where RouterCLI is reached via SSH using a shared Unix account. In this scenario the OS identity alone does not tell RouterCLI who is really logging in and the username capture through the CLI authentication process becomes the session's identity. The account used via SSH is only logged as how the connection was established.
+
+#### `EnableTOTPAuthentication`
+
+This property is the system-wide switch for whether a TOTP code is ever
+required as part of establishing a session, on top of whichever of
+`EnableHostAuthentication` or `EnableCLIAuthentication` actually identifies
+the account. The default is `true`. It cannot stand alone, turning it on
+while both `EnableHostAuthentication` and `EnableCLIAuthentication` are
+`false` is a hard error at startup, since a second factor is a step up on
+top of a primary identity, not a substitute for one. When
+`EnableCLIAuthentication` alone is on, this simply governs whether the login
+prompt's existing per-user `totp_secret` check runs at all, and a user with
+no `totp_secret` set in `UsersFile` is still never prompted for a code
+regardless. When only `EnableHostAuthentication` is on, this is what
+requires a TOTP step up at all, since trusting the OS identity alone
+otherwise needs no further check.
+
+#### `AuthProviders`
+
+This property lists every authentication backend this deployment has
+configured, so a project can add a new kind of backend, an LDAP or a RADIUS
+server for instance, by adding an entry here rather than by changing code.
+Each entry needs a `name` and a `type`, both required and, for `name`,
+unique across the list. Only `local` has a real implementation today,
+bcrypt hashes checked against `UsersFile`, and an unrecognized `type` is a
+hard error at startup, the same fail loudly convention every other
+malformed setting in this file already follows. The default is a single
+entry named `local` of type `local`. Only the provider named by
+`CLIAuthProvider` below is actually put to use today.
+
+```yaml
+AuthProviders:
+  - name: local
+    type: local
+```
+
+#### `CLIAuthProvider`
+
+This property names which entry in `AuthProviders` `EnableCLIAuthentication`'s
+own login prompt checks a typed password against. The default is `local`.
+This is ignored entirely when `EnableCLIAuthentication` is `false`, and MUST
+name an entry that actually exists in `AuthProviders` when
+`EnableCLIAuthentication` is `true`, checked at startup.
 
 #### `UsersFile`
 

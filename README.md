@@ -302,6 +302,56 @@ A user needs `password` set to log in, but this only matters when
 `AuthRequired` is `true`. When it is `false`, login is skipped entirely and
 `etc/users.yaml` is never even read.
 
+A session's identity can come from either, or both, of two independent
+sources, each with its own on and off switch:
+
+```yaml
+# etc/routercli.yaml
+EnableHostAuthentication: false   # trust the OS account routercli runs as
+EnableCLIAuthentication: true     # routercli's own interactive login prompt
+```
+
+`EnableCLIAuthentication` is the original behavior shown above and stays on
+by default. `EnableHostAuthentication` trusts whichever operating system
+account routercli itself is running as, read through the standard library,
+with no password prompted for or checked on that path at all. This is meant
+for a deployment reached over SSH, where `sshd` already authenticated the
+underlying Unix account before routercli ever started, whether routercli is
+installed as that account's login shell or reached through a
+`ForceCommand`. At least one of the two MUST be true whenever `AuthRequired`
+is `true`, or routercli refuses to start.
+
+Both may be true together, which describes a shared Unix account reached
+over SSH, where the OS identity alone does not tell routercli which real
+person is at the keyboard. In that combination, the CLI login's own
+username becomes the session's identity used from that point on, while the
+OS account routercli was reached as is kept only as a record of how the
+connection arrived.
+
+A TOTP second factor, described further below, has its own system-wide
+switch, `EnableTOTPAuthentication`, on by default and unable to stand alone,
+since a second factor is a step up on top of a primary identity, not a
+substitute for one.
+
+Which backend `EnableCLIAuthentication`'s login prompt actually checks a
+typed password against is configurable rather than hardcoded, so a project
+can add a new kind of backend, an LDAP or a RADIUS server for instance, by
+adding an entry rather than by changing code:
+
+```yaml
+# etc/routercli.yaml
+AuthProviders:
+  - name: local
+    type: local
+CLIAuthProvider: local
+```
+
+`AuthProviders` lists every backend this deployment has configured, and
+`CLIAuthProvider` names which entry the login prompt actually uses. Only
+`local`, bcrypt hashes checked against `UsersFile`, has a real
+implementation today. See `etc/README.md` for the full field list and
+exactly what each setting does.
+
 Setting a password gate to enter a Command Level is also possible. The example
 uses the concept of elevating with `enable`, but this would be called whatever
 your own manifest calls the command to do this kind of Command Level swap. It
@@ -371,6 +421,13 @@ Level and live in `var/tree/level_exec.yaml` not the base level's own tree.
 This means an unelevated session cannot reach them. Every dispatched command is
 recorded with a timestamp, the username, or `-` if unauthenticated, and whether
 it succeeded.
+
+A `SESSION START` entry and a matching `SESSION END` entry bracket every
+session unconditionally, written even when `AuditLogEnabled` is off, so a
+session's own boundaries are always in the record regardless of the runtime
+`audit-log enable` and `audit-log disable` toggle. `SESSION START` also
+names the connecting host account when `EnableHostAuthentication` brought
+the session in.
 
 This is a different thing from the general system log(`LogLevel` and `LogFile`
 in `etc/routercli.yaml`). The audit log is a fixed-format compliance record of
