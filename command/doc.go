@@ -10,13 +10,15 @@ YAML command trees, but never needs to touch this package to do so.
 That separation is why this package exists as its own thing: nothing
 here knows about hostnames, interfaces, or any other actual routercli
 command, only about the shape a command line interface like this takes.
-See package cmd for the actual commands.
+See package core, in cmd/core, and package product, in cmd/product, for
+the actual commands this repository ships as its own broadly reusable
+set and its own working example, respectively.
 
 This package provides the command tree data structure, abbreviation
 resolution, tab completion support, mode nesting such as config and
 config interface, the Command Level system that covers both privilege
 levels and plain nested modes, and the registration mechanism that lets
-a command handler in package cmd make itself known. A project building
+a command handler in cmd/core or cmd/product make itself known. A project building
 on this framework mostly interacts with three things: Command and the
 tree shape, which is what a command is, AppContext, which is what a
 handler receives, and CommandLevelStack and TreeStructure, which govern
@@ -57,8 +59,8 @@ ValidateArgs is a separate step on purpose. Resolve only answers which
 command was meant. ValidateArgs, called by runLoop right after and
 before RunFunc is ever invoked, checks the resolved command's own MinArgs,
 MaxArgs, and MaxArgLength against what is left over. A handler in
-package cmd never has to check argument count itself, since by the time
-its HandlerFunc runs that is already guaranteed.
+cmd/core or cmd/product never has to check argument count itself, since
+by the time its HandlerFunc runs that is already guaranteed.
 
 # Command Level Navigation
 
@@ -91,9 +93,9 @@ levels in its own var/tree/tree_structure.yaml manifest, each with its
 own declared enter and exit command names and its own choice of whether
 it inherits everything its parent level could already do, through
 InheritParent. Every level's enter and exit command is a hand-written
-cmd/cmd_*.go file, with no exceptions. See cmd/cmd_enable.go,
-cmd/cmd_diagnostic_mode.go, cmd/cmd_configure.go, and
-cmd/cmd_interface.go for examples. A level reached by swapping the root
+cmd_*.go file, with no exceptions. See cmd/core/cmd_enable.go,
+cmd/product/cmd_diagnostic_mode.go, cmd/core/cmd_configure.go, and
+cmd/product/cmd_interface.go for examples. A level reached by swapping the root
 frame calls EnterCommandLevel and ExitCommandLevel. A nested mode calls
 RequireCurrentCommandLevel directly and pushes its own CommandLevelStack
 frame. Neither generates a Register call from manifest data. Both are
@@ -109,17 +111,19 @@ check, not something this package acts on to register anything itself.
 # Registration
 
 Register(name, fn) is how a command handler, almost always written in
-package cmd in its own cmd_<name>.go file and called from that file's
-init(), makes itself known. See package cmd's own doc comment for the
-full walkthrough of writing a new command. This package only owns the
-registry itself and the lookup LoadTree performs against it when a YAML
-tree file's "run:" directive needs to resolve to an actual function.
+cmd/core or cmd/product in its own cmd_<name>.go file and called from
+that file's init(), makes itself known. See package core's and package
+product's own doc comments for the full walkthrough of writing a new
+command. This package only owns the registry itself and the lookup
+LoadTree performs against it when a YAML tree file's "run:" directive
+needs to resolve to an actual function.
 
 # AppContext
 
 AppContext is the one value every command handler receives. See its own
 doc comment for the full field by field breakdown. It is constructed
 once, in main.go, and passed through the rest of the program from
-there. Nothing in this package or package cmd constructs a second one.
+there. Nothing in this package, cmd/core, or cmd/product constructs a
+second one.
 */
 package command

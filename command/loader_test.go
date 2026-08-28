@@ -17,8 +17,8 @@ import (
 // a duplicate name, and multiple test functions in this file each
 // need something in the registry to resolve against. This package
 // intentionally has nothing registered by default, that only happens
-// when package cmd is actually imported, and these tests correctly do
-// not depend on that import.
+// when cmd/core or cmd/product is actually imported, and these tests
+// correctly do not depend on either import.
 var testHandlersOnce sync.Once
 
 func registerTestHandlers() {
@@ -201,6 +201,73 @@ commands:
 	}
 	if leaf.MaxArgLength != 10 {
 		t.Errorf("MaxArgLength = %v, want 10", leaf.MaxArgLength)
+	}
+}
+
+// TestLoadTreeSetsDefIndexInFileOrder - This test verifies that
+// commandMap.UnmarshalYAML stamps each command's DefIndex with its
+// position among its own siblings in the source file, the one piece
+// of ordering information a plain map[string]*Command decode would
+// otherwise lose for good, since ListOptions.Alphabetical false relies
+// on it. "zebra" is listed first in this file and "alpha" second, on
+// purpose, so a test that accidentally checked alphabetical order
+// instead of file order would fail.
+func TestLoadTreeSetsDefIndexInFileOrder(t *testing.T) {
+	registerTestHandlers()
+	yaml := `
+commands:
+  zebra:
+    run: test.noop
+  alpha:
+    run: test.noop
+    subcommands:
+      second:
+        run: test.noop
+      first:
+        run: test.noop
+`
+	path := writeTempFile(t, "tree-*.yaml", yaml)
+	tree, err := LoadTree(path)
+	if err != nil {
+		t.Fatalf("LoadTree returned unexpected error: %v", err)
+	}
+
+	if tree["zebra"].DefIndex != 0 {
+		t.Errorf("zebra.DefIndex = %d, want 0 (listed first)", tree["zebra"].DefIndex)
+	}
+	if tree["alpha"].DefIndex != 1 {
+		t.Errorf("alpha.DefIndex = %d, want 1 (listed second)", tree["alpha"].DefIndex)
+	}
+
+	sub := tree["alpha"].Subcommands
+	if sub["second"].DefIndex != 0 {
+		t.Errorf("alpha->second.DefIndex = %d, want 0 (listed first within alpha's own subcommands)", sub["second"].DefIndex)
+	}
+	if sub["first"].DefIndex != 1 {
+		t.Errorf("alpha->first.DefIndex = %d, want 1 (listed second within alpha's own subcommands)", sub["first"].DefIndex)
+	}
+}
+
+// TestLoadTreeUnknownFieldInsideSubcommandIsError - This test verifies
+// that decodeCommandStrict's KnownFields enforcement, needed since a
+// *yaml.Node's own Decode has no KnownFields option of its own to
+// carry over from LoadTree's top-level strict decoder, reaches a
+// nested subcommand entry too, not just a top-level one, see
+// TestLoadTreeUnknownFieldIsError above for the top-level case this
+// mirrors.
+func TestLoadTreeUnknownFieldInsideSubcommandIsError(t *testing.T) {
+	yaml := `
+commands:
+  show:
+    desc: "top"
+    subcommands:
+      version:
+        dsec: "typo'd property name, nested this time"
+`
+	path := writeTempFile(t, "tree-*.yaml", yaml)
+	_, err := LoadTree(path)
+	if err == nil {
+		t.Fatal("expected an error for an unknown field nested inside a subcommand, got nil")
 	}
 }
 

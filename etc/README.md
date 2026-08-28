@@ -71,6 +71,21 @@ This is the path and filename to the tree structure manifest file. The default i
 
 This is the path and filename to the file defining the commands common to every Command Level (i.e., `help`, `exit`, `end`). These will be merged into every level at load time unless that level sets `skip_common`. The default is `var/tree/level_common.yaml`.
 
+#### `AlphabeticalCommandOrder`
+
+This property controls how `help`, `?`, and Tab completion order a listing of more than one command name. The default is `true`. When this is set to `true` every listing is sorted alphabetically by name. When this is set to `false` the listing follows the order commands are defined in their tree file. If this property is `false` then `MergeCommonCommands` MUST also be `false`.
+
+#### `MergeCommonCommands`
+
+This property controls where the common commands (e.g., `help`, `?`, `exit`, `end`) are merged into the respective commands at the Command Level. The default is `true`. When this is set to `true` the common commands are merged in and sorted with all the other commands at that Command Level. When this is set to `false` all the common commands are appended after everything else.
+
+NOTE: Here are the four (4) use cases for the sorting of Commands in a Command Level. 
+
+ - `AlphabeticalCommandOrder` is `true` and `MergeCommonCommands` is `true` = All Commands are sorted alphabetically. This is the default and normal behavior. 
+ - `AlphabeticalCommandOrder` is `true` and `MergeCommonCommands` is `false` = All the normal commands are first in alphabetical order, then the common commands are listed in their own alphabetical order. 
+ - `AlphabeticalCommandOrder` is `false` and `MergeCommonCommands` is `true` = This use case does not make sense, because you cannot merge the commands and yet keep them in the order they were listed in their YAML file. This combination results in a hard error at startup.
+ - `AlphabeticalCommandOrder` is `false` and `MergeCommonCommands` is `false` = All the normal commands are listed first in the order they appear in the YAML file. Then the common commands are listed also in the order in which they appear in the YAML file.  
+
 ### Authentication Settings
 
 #### `AuthRequired`
@@ -146,6 +161,24 @@ These three properties each add one composition rule a new password MUST satisfy
 #### `PasswordChangeMaxAttempts`
 
 This property defines how many times in a row the `password change` command lets a session retry, both re-entering its current password, and a TOTP code if one is configured, and re-typing a new password that failed to match its own confirmation or the policy above, before giving up. The default is `3`.
+
+### Output Paging and Filtering Settings
+
+#### `PagingEnabled`
+
+This property is the deployment wide switch for the interactive `--More--` pager. The default is `true`. It only ever applies to a command whose own tree entry sets `pageable: true`, see `var/tree/README.md`. Turning this off does not disable `| include`, `| exclude`, or `| begin` filtering itself, only the pause; a Pageable command's output is still filtered, it is simply written straight through afterward with no pause at all.
+
+#### `DefaultPageLines`
+
+This property sets how many lines a session shows before pausing, used only when the real terminal's own height cannot be detected, a non-interactive session for instance, and no `terminal length` has been typed yet that session. The default is `24`. When the terminal's height can be detected, that real height, minus one line reserved for the `--More--` prompt itself, is used instead.
+
+#### `FilterMatchMode`
+
+This property chooses how `| include`, `| exclude`, and `| begin` match their pattern against each line of output. The default is `substring`, a plain, literal text search, predictable for an operator who never wants to think about regular expression metacharacters, a period in an IP address for instance. The other allowed value, `regex`, compiles the pattern as a real Go RE2 regular expression, matching exactly what a real Cisco or HP device does. Either value can be switched at runtime, for the current session only, with `terminal filter-mode <substring|regex>`.
+
+#### `MaxFilterChainDepth`
+
+This property limits how many `| ...` filters may be chained together on one command line, `show running-config | include eth0 | exclude shutdown` being a chain of two. The default is `2`. This exists as a security limit, not just a convenience one: an unbounded chain lets a session ask this deployment to do an unbounded amount of filtering work from one typed line. A value of `0` disables filtering entirely; a command line with any `| ...` at all is then refused with an error. A chain deeper than this value is also refused with an error, never silently truncated or run anyway.
 
 ## Properties for the users.yaml YAML file
 

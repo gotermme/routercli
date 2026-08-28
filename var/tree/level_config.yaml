@@ -7,7 +7,7 @@ commands:
     minargs: 1
     maxargs: 1
     maxarglength: 64
-    # "no hostname" resets to the default name. See cmd/cmd_hostname.go.
+    # "no hostname" resets to the default name. See cmd/product/cmd_hostname.go.
     negatable: true
     run: hostname
 
@@ -16,7 +16,7 @@ commands:
     minargs: 1
     maxargs: 1
     maxarglength: 32
-    # Pushes config-if mode (see cmd/cmd_interface.go), scoped to
+    # Pushes config-if mode (see cmd/product/cmd_interface.go), scoped to
     # whichever interface name was given.
     run: interface
 
@@ -47,3 +47,9 @@ commands:
         maxargs: 1
         arghelp_key: terminal.width.arghelp
         run: terminal.width
+      filter-mode:
+        desc_key: terminal.filter_mode.desc
+        minargs: 1
+        maxargs: 1
+        arghelp_key: terminal.filter_mode.arghelp
+        run: terminal.filter-mode

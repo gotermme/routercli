@@ -66,7 +66,7 @@ answer "who is this" and "what can they do right now" without re-deriving it on
 every command. See Session's own doc comment for exactly what each field means
 and who is responsible for keeping it current. The short version is that this
 package only ever sets Username/Authenticated, CommandLevel /
-CommandLevelEnteredAt are set by whichever hand-written cmd/cmd_*.go file calls
+CommandLevelEnteredAt are set by whichever hand-written cmd_*.go file calls
 command.EnterCommandLevel / ExitCommandLevel instead, which is why NewSession
 leaves CommandLevel as the zero value rather than trying to guess it.
 
@@ -86,7 +86,7 @@ second forever.
 Enrollment itself has two entry points into the same underlying functions.
 main.go's --mfa flag drives it from the command line, before the CLI ever
 starts, requiring a relaunch to actually take effect. The user Command Level
-and its totp enable and totp disable commands, both in package cmd, drive the
+and its totp enable and totp disable commands, both in package core (cmd/core), drive the
 identical GenerateTOTPSecret, TOTPProvisioningURI, and VerifyTOTPCode calls
 from inside a running, already logged in session instead, through
 PromptTOTPCode below for reading the confirmation code and SaveUsers above

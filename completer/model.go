@@ -51,6 +51,12 @@ type TreeListener struct {
 	logger     *log.Logger
 	translator *i18n.Translator
 
+	// listOptions controls how OnChange and handleHelp order a
+	// candidate list of more than one command name, see
+	// command.ListOptions's own doc comment. New's own doc comment
+	// covers where this actually comes from.
+	listOptions command.ListOptions
+
 	currentPrompt      string
 	lastAmbiguousInput string
 	tapCount           int
@@ -63,12 +69,18 @@ type TreeListener struct {
 // New - This function constructs a TreeListener bound to a given
 // CommandLevelStack, a readline instance, needed to print the option
 // list in the right place, a logger, for debug-level tracing of
-// completion decisions, and a translator, which resolves a Command's
-// ArgHelpKey, see the ArgHelp hint in OnChange.
+// completion decisions, a translator, which resolves a Command's
+// ArgHelpKey, see the ArgHelp hint in OnChange, and listOptions, which
+// controls the order OnChange and handleHelp print a candidate list
+// in, see command.ListOptions's own doc comment. main.go builds
+// listOptions once from config.SystemConfig and passes the exact same
+// value it also put on AppContext.ListOptions, so the interactive "?"
+// and Tab paths here and the non-interactive "?" fallback in main.go's
+// own runLoop always agree on how a listing is ordered.
 //
 // translator may be nil. Command.ResolvedArgHelp already handles a nil
 // *i18n.Translator the same way ResolvedDesc and ResolvedHelp do, falling
 // back to the literal ArgHelp field.
-func New(position *command.CommandLevelStack, instance *readline.Instance, logger *log.Logger, translator *i18n.Translator) *TreeListener {
-	return &TreeListener{position: position, instance: instance, logger: logger, translator: translator, tapCount: 0}
+func New(position *command.CommandLevelStack, instance *readline.Instance, logger *log.Logger, translator *i18n.Translator, listOptions command.ListOptions) *TreeListener {
+	return &TreeListener{position: position, instance: instance, logger: logger, translator: translator, listOptions: listOptions, tapCount: 0}
 }

@@ -122,6 +122,37 @@ func TestLoadTreeStructureBasicTwoLevelChain(t *testing.T) {
 	}
 }
 
+// TestLoadTreeStructureMarksCommonCommandsButNotOwnCommands - This
+// test verifies that markCommonCommands stamps IsCommonCommand true on
+// every command that came from the common tree, "exit" here, merged
+// into every level's Tree unless SkipCommonMerge, and leaves a level's
+// own commands, "show" here, false. SortCommandNames's own MergeCommon
+// ordering depends on this distinction actually reaching every level's
+// Tree, not just the common tree's own standalone map.
+func TestLoadTreeStructureMarksCommonCommandsButNotOwnCommands(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	common := writeTempFile(t, "common-*.yaml", "commands:\n  exit:\n    run: test.noop\n")
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+`)
+
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure returned unexpected error: %v", err)
+	}
+
+	tree := levels.Base().Tree
+	if tree["show"] == nil || tree["show"].IsCommonCommand {
+		t.Error("expected \"show\", the level's own command, to have IsCommonCommand false")
+	}
+	if tree["exit"] == nil || !tree["exit"].IsCommonCommand {
+		t.Error("expected \"exit\", merged in from the common tree, to have IsCommonCommand true")
+	}
+}
+
 // TestLoadTreeStructureInheritParentFalseExcludesParentCommands - This
 // test verifies that InheritParent false carries only the child
 // level's own commands forward, with none of the parent's commands
@@ -858,7 +889,7 @@ func TestRequireCurrentCommandLevelChecksCommandLevelStackNotSessionCommandLevel
 // confirms the other half of the fix. After SetRootTree, Current().Name
 // at the root correctly reflects the new level, so a check against
 // that level's own name succeeds. This matches what a hand-written
-// cmd/cmd_*.go file entering a nested mode directly off an elevated
+// cmd_*.go file entering a nested mode directly off an elevated
 // root, config with parent exec, needs to work at all.
 func TestRequireCurrentCommandLevelAtRootAfterSetRootTree(t *testing.T) {
 	session := &auth.Session{CommandLevel: "base"}

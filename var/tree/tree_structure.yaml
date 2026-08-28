@@ -28,8 +28,8 @@ trees:
     prompt_suffix: "(config)"
     enter_command: configure.terminal
     # No exit_command. This level is left through the generic "exit"
-    # and "end" commands (cmd/cmd_mode_control.go), not a dedicated
-    # named command.
+    # and "end" commands (cmd/core/cmd_mode_control.go), not a
+    # dedicated named command.
 
   config-if:
     tree_file: var/tree/level_config_if.yaml
@@ -39,7 +39,7 @@ trees:
     enter_command: interface
     # No exit_command, same reasoning as config above. Also note that
     # "interface <name>" takes an argument, the interface name itself,
-    # that cmd/cmd_interface.go stashes on the pushed
+    # that cmd/product/cmd_interface.go stashes on the pushed
     # ModeFrame.Context. This manifest deliberately knows nothing
     # about that, only the bare command name.
 
@@ -52,5 +52,5 @@ trees:
     # No exit_command, same reasoning as config above. Reached
     # directly from base, not from exec, since managing one's own
     # account, multi-factor enrollment and a password change alike,
-    # only requires being logged in, see cmd/cmd_user.go, not the
+    # only requires being logged in, see cmd/core/cmd_user.go, not the
     # separate, unrelated privilege step "enable" gates.

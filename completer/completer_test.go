@@ -41,7 +41,7 @@ func TestNewConstructsTreeListenerWithGivenFields(t *testing.T) {
 	position := command.NewCommandLevelStack("exec", "", testTree())
 	logger := testLogger()
 
-	l := New(position, nil, logger, nil)
+	l := New(position, nil, logger, nil, command.DefaultListOptions())
 
 	if l.position != position {
 		t.Error("expected New to store the given CommandLevelStack")

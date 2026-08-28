@@ -83,9 +83,9 @@ func LoadUsers(path string) (Users, error) {
 // SaveUsers - This function writes users back to path, under the same
 // single top-level "users:" key LoadUsers reads. This is what lets a
 // running session, most notably the totp enable and totp disable
-// commands in package cmd, persist a change made mid-session rather
-// than requiring an administrator to hand edit the file and restart
-// the program for it to take effect.
+// commands in package core (cmd/core), persist a change made
+// mid-session rather than requiring an administrator to hand edit the
+// file and restart the program for it to take effect.
 //
 // The write is atomic. A temporary file is written in the same
 // directory as path and then renamed over it, so a process

@@ -22,10 +22,10 @@ var registry = map[string]HandlerFunc{}
 // Public Functions - Registry
 // ----------------------------------------------------------------------
 
-// Register - This function lets a command's own file in package cmd
-// make itself known to the command tree loader from its init(),
-// without anyone having to edit this file or main.go to add a new
-// command. name is the string a tree YAML file's "run" directive
+// Register - This function lets a command's own file in cmd/core or
+// cmd/product make itself known to the command tree loader from its
+// init(), without anyone having to edit this file or main.go to add a
+// new command. name is the string a tree YAML file's "run" directive
 // references to wire this handler into a specific place in the
 // command tree.
 //

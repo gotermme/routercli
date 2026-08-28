@@ -61,17 +61,19 @@ It is important to understand the distinction when building your own CLI:
  - **The framework**: 
    - `auditlog/`, `auth/`, 
    - `command/`, `config/`, `completer/`
-   - `tokenize/`, `i18n/`. 
+   - `tokenize/`, `i18n/`, `paging/`. 
    - These packages know nothing about routers, interfaces, or hostnames. They
      are the reusable machinery that enables things like: Auditing,
      Authentication, Command resolution, Configuration file parsing, Tab
      completion, Interactive `?` help, Command Levels and Tree Structure
-     processing, and internationalization (i18n)
- - **The CLI Environment (currently populated with an example)**: 
-   - `cmd/` (the command handlers, such as `show`, `hostname`, etc),
+     processing, internationalization (i18n), and output paging and
+     pipe filtering
+ - **The CLI Environment (currently populated with a broadly reusable core set and a working example)**: 
+   - `cmd/core/` (the command handlers broadly useful to almost any project, login and session elevation, terminal paging and filtering, password and TOTP self service, and similar),
+   - `cmd/product/` (the Cisco and HP flavored demonstration commands, `hostname`, `interface`, and similar, meant to be read, copied, and replaced),
    - `var/tree/*.yaml` (the Tree Structure, Command Level definitions)
    - `var/lang/*.yaml` (the language catalog)
-   - These are demonstration content, meant to be read, copied, and replaced.
+   - Unlike the framework packages, both `cmd/core/` and `cmd/product/` are openly optional. See "What is `cmd/core` versus `cmd/product`, and is either one required?" below.
 
 ## Layout
 
@@ -85,18 +87,54 @@ RouterCLI
 │   ├── auditlog
 │   ├── config
 │   ├── tokenize
-│   └── i18n
+│   ├── i18n
+│   └── paging
 │
-└── Example CLI
-    ├── cmd/
+└── CLI Environment
+    ├── cmd/core/
+    ├── cmd/product/
     ├── var/tree/
     ├── var/lang/
     └── etc/
 ```
 
 Building your own CLI means keeping the framework packages as they are,
-replacing the example command handlers and tree files with your own, and
-writing the small entry and exit files your own Tree Structure needs.
+keeping as much or as little of `cmd/core` as fits your own project, replacing
+`cmd/product` and its tree and language entries with your own, and writing
+the small entry and exit files your own Tree Structure needs.
+
+### What is `cmd/core` versus `cmd/product`, and is either one required?
+
+Neither package is required by package `command`, and neither package is
+required by the other. `cmd/core` holds command handlers useful to almost
+any project built on RouterCLI: elevating a session to a more privileged
+Command Level, entering and leaving configuration mode, terminal paging and
+output filtering settings, and password and TOTP self service. `cmd/product`
+holds the Cisco and HP flavored demonstration commands this repository ships
+as its own working example, `hostname`, `interface` configuration, `show
+running-config`, and similar, built on top of what `cmd/core` provides but in
+no way required by it.
+
+A project keeps `cmd/core` largely unchanged, drops `cmd/product` entirely
+and writes its own commands in its place, and still gets everything
+`cmd/core` provides working correctly, since nothing in `cmd/core` depends on
+`cmd/product`'s own application state. A project could equally drop parts of
+`cmd/core` it does not want, TOTP self service for instance, by deleting the
+one file that registers it and removing its entries from the affected
+`var/tree/level_*.yaml` files.
+
+This same "encouraged, not required" reasoning covers one further, specific
+convention: `cmd/core` registers `enable` and `disable`, moving a session
+into a Command Level named `exec`, the same two tier, unprivileged then
+privileged shape real Cisco and HP devices both use. This is an encouraged
+convention this repository's own example follows, not a requirement package
+`command` or `main.go` imposes. A project is free to rename this Command
+Level to something else entirely, add further privilege tiers beyond plain
+`exec`, or drop the whole idea of a privileged mode and run every command
+directly out of `base`. See `cmd/core/doc.go`'s own "Encouraged, Not
+Required" section for the full reasoning, and `cmd/core/cmd_enable.go`'s own
+doc comment for why nothing beyond that one file's string literals would
+need to change to rename it.
 
 ## Directory layout
 
@@ -130,10 +168,25 @@ tokenize/      Quote-aware line tokenizer and its inverse, used for the
 i18n/          Support for internationalization via a language catalog
                (flat YAML per language, with a real fallback chain)
 
+paging/        Output paging and pipe filtering: SplitPipeline and
+               ParseStages turn typed tokens into a filter pipeline,
+               ApplyFilters runs "| include", "| exclude", and "|
+               begin" against a command's captured output, and Display
+               is the interactive "--More--" pager itself
+
 
 End Application
 
-cmd/           One file per command, each self-registering through init().
+cmd/core/      Command handlers broadly useful to almost any project,
+               one file per command, each self-registering through
+               init(): session elevation, configuration mode entry,
+               terminal paging and filtering, and password and TOTP
+               self service.
+
+cmd/product/   The Cisco and HP flavored demonstration commands this
+               repository ships as its own working example, built the
+               same way, one file per command self-registering through
+               init(). Meant to be read, copied, and replaced.
 
 var/tree/      The Tree Structure manifest (tree_structure.yaml) and
                each Command Level's own command tree (level_*.yaml).
@@ -150,15 +203,22 @@ etc/           The main configuration file (routercli.yaml) and the
 
 ### 1. Add a command
 
-Every command is one file in `cmd/` that registers a handler from
-`init()`. Copy the shape of an existing one: `cmd/cmd_show.go` for a
-simple read-only command, `cmd/cmd_set.go` for one that takes an
-argument and mutates state, or `cmd/cmd_interface.go` if you are building
-something that enters a new mode.
+Every command is one file in `cmd/core` or `cmd/product` that registers a
+handler from `init()`. A command with no dependency on your own project's
+application state, the way `cmd/core/cmd_show.go`'s "show version" has none,
+fits naturally in `cmd/core`, or your own equivalent package if you have
+replaced it. A command that reads or mutates your own project's state, the
+way `cmd/product/cmd_set.go` does, fits in `cmd/product`, or your own
+replacement for it. Copy the shape of an existing one:
+`cmd/core/cmd_show.go`'s "show version" registration for a simple read-only
+command with no state dependency, `cmd/product/cmd_set.go` for one that
+takes an argument and mutates your own project's state, or
+`cmd/product/cmd_interface.go` if you are building something that enters a
+new mode.
 
 ```go
-// cmd/cmd_ping.go
-package cmd
+// cmd/product/cmd_ping.go
+package product
 
 import (
    "fmt"
@@ -230,15 +290,16 @@ automatically.
 ### 4. Adding a new Command Level
 
 A Command Level is an entry in `var/tree/tree_structure.yaml`, its own
-`level_<name>.yaml`, and a hand-written `cmd/cmd_*.go` file that actually moves
-a session into it. See `var/tree/README.md` for the full manifest schema. There
-is no separate registration step in `main.go`. Add the entry to the manifest
-and write the one small file, and it is available.
+`level_<name>.yaml`, and a hand-written `cmd_*.go` file, in `cmd/core` or
+`cmd/product`, that actually moves a session into it. See `var/tree/README.md`
+for the full manifest schema. There is no separate registration step in
+`main.go`. Add the entry to the manifest and write the one small file, and
+it is available.
 
 **A nested, stacking mode** (config-if layered on top of config, for
 example) calls `command.RequireCurrentCommandLevel` directly and pushes
-its own `CommandLevelStack` frame. This is what `cmd_configure.go` and
-`cmd_interface.go` already do:
+its own `CommandLevelStack` frame. This is what
+`cmd/core/cmd_configure.go` and `cmd/product/cmd_interface.go` already do:
 
 ```go
 // entering the new mode
@@ -257,8 +318,8 @@ ctx.Position.Push(command.CommandLevelFrame{
 **A root swap Command Level** (a new Command Level alongside `exec` or
 `diagnostic`, where, unlike the nested mode above, only one can ever be
 active at a time) calls `command.EnterCommandLevel` and
-`command.ExitCommandLevel` instead. See `cmd_enable.go` and
-`cmd_diagnostic_mode.go` for the exact pattern to copy.
+`command.ExitCommandLevel` instead. See `cmd/core/cmd_enable.go` and
+`cmd/product/cmd_diagnostic_mode.go` for the exact pattern to copy.
 
 Either way, `help`, `exit`, and `end` come from `var/tree/level_common.yaml`
 automatically. Do not redefine them in a Command-Level-specific file; doing so
@@ -449,7 +510,81 @@ and keeps reading. The only way out becomes the `exit` command. NOTE: This
 cannot block `SIGKILL` or `SIGSTOP`. Nothing can, on any OS, in any language.
 That is a kernel guarantee, not a gap in this implementation.
 
-## 9. Testing
+### 9. Output paging and filtering
+
+RouterCLI can pipe a command's own output through `| include`, `| exclude`,
+and `| begin`, the same three keywords a real Cisco or HP device supports,
+and pause long output behind an interactive `--More--` prompt, the same way
+those devices do. Both live in the `paging` package, and both apply only to
+a command whose own tree entry sets `pageable: true`, see `var/tree/README.md`.
+This is opt-in per command on purpose, one command at a time, rather than on
+for every command with an exclusion list, since a command whose handler
+reads directly from the terminal partway through running, a masked password
+prompt for instance, must never have its output captured this way. The
+shipped example marks every `show *` command `pageable: true`.
+
+```
+router# show running-config | include interface
+interface eth0
+interface eth1
+router# show running-config | exclude !
+hostname router1
+interface eth0
+router# show running-config | begin interface
+interface eth0
+ description uplink
+interface eth1
+```
+
+Filters chain left to right, each one narrowing what the previous one
+already produced:
+
+```
+router# show running-config | include interface | exclude eth1
+interface eth0
+ description uplink
+```
+
+How deep a chain may go is a security setting, `MaxFilterChainDepth` in
+`etc/routercli.yaml`, `2` by default. A command line asking for more filters
+than that is refused with an error rather than silently truncated or run
+anyway. Setting it to `0` disables filtering entirely.
+
+By default a pattern is matched as a plain, literal substring,
+`FilterMatchMode: substring` in `etc/routercli.yaml`, predictable for an
+operator who never wants to think about regular expression
+metacharacters, a period in an IP address for instance. Switching to
+`FilterMatchMode: regex` compiles the pattern as a real Go RE2 regular
+expression instead, matching exactly what a real Cisco or HP device does.
+Either mode can also be switched at runtime, for the current session only,
+with `terminal filter-mode <substring|regex>`.
+
+Output longer than one screen pauses behind a `--More--` prompt, honoring
+the same keys a real device does: Space shows the next full page, Enter or
+Return shows exactly one more line, and `q`, `Q`, or Ctrl-C stops
+immediately. `terminal length <0-512>` sets how many lines a session shows
+before pausing, for the rest of that session; `terminal length 0` disables
+pausing entirely, the real Cisco convention for "never pause." With no
+`terminal length` ever typed, the real terminal's own detected height is
+used instead. `terminal width <0-512>` is reported back the same way but
+otherwise has no effect within RouterCLI itself. `PagingEnabled: false` in
+`etc/routercli.yaml` turns pausing off deployment-wide, without affecting
+filtering at all.
+
+`terminal length` and `terminal width` are session-only values, exactly
+matching real Cisco and HP behavior: neither ever appears in
+`show running-config` or `show startup-config` on a real device, and
+neither does here either. `show terminal` reports a session's current
+values instead, the one place they are surfaced back:
+
+```
+router# show terminal
+Length: 24 lines, Width: 0 columns
+Paging: enabled (session), enabled (global)
+Filter mode: substring
+```
+
+## 10. Testing
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -471,13 +606,15 @@ editing it, run `./routercli --check-config`. It loads and verifies the Tree
 Structure without starting the interactive loop, and is worth running as part
 of the same routine.
 
-## 10. Code execution logic
+## 11. Code execution logic
 
 1. `main.go` runs.
-2. Every `init()` in `cmd/` runs. This happens automatically, before
-   `main()` even begins, purely because `main.go` imports package `cmd`.
-   Every command, including each Command Level's own enter and exit
-   command, is registered here.
+2. Every `init()` in `cmd/core` and `cmd/product` runs. This happens
+   automatically, before `main()` even begins, purely because `main.go`
+   imports both packages, `cmd/core` as a blank import since nothing needs
+   to reference it by name, `cmd/product` as a named import for its
+   `ProductState` type. Every command, including each Command Level's own
+   enter and exit command, is registered here.
 3. `main.go` reads `etc/routercli.yaml` to find the Tree Structure
    manifest's path, along with the common tree's path.
 4. `main.go` calls `command.LoadTreeStructure`, which parses

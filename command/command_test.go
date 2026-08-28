@@ -118,6 +118,55 @@ func TestResolveHiddenCommandNotAbbreviatable(t *testing.T) {
 	}
 }
 
+// TestResolveHiddenSiblingDoesNotBlockUniqueVisibleAbbreviation - This
+// test verifies that a Hidden command sharing a prefix with exactly
+// one visible sibling never makes that visible sibling's own
+// abbreviation ambiguous. "test" and "testnothidden" both start with
+// "tes", but "test" is Hidden, so "tes" must resolve directly and
+// uniquely to "testnothidden", the same as if "test" did not exist at
+// all. TestResolveHiddenCommandNotAbbreviatable above already confirms
+// a Hidden command itself cannot be reached by abbreviation; this is
+// the companion case, confirming a Hidden command does not interfere
+// with a different command's abbreviation either.
+func TestResolveHiddenSiblingDoesNotBlockUniqueVisibleAbbreviation(t *testing.T) {
+	tree := map[string]*Command{
+		"test":          {Hidden: true},
+		"testnothidden": {},
+	}
+	res := Resolve(tree, []string{"tes"})
+	want := []string{"testnothidden"}
+	if !reflect.DeepEqual(res.FullName, want) {
+		t.Errorf("FullName = %v, want %v (hidden sibling must not create ambiguity)", res.FullName, want)
+	}
+	if len(res.Ambiguous) != 0 {
+		t.Errorf("expected no ambiguity, got %v", res.Ambiguous)
+	}
+}
+
+// TestResolveNoMatchUnderDescendedNodeKeepsParentCommandAsArgs - This
+// test verifies that once a command with children has been matched,
+// for example "show", a following token that matches none of its
+// Subcommands does not lose the already matched parent. Command must
+// still carry "show" itself, not nil, with the unmatched token and
+// everything after it folded into Args, the same behavior
+// TestResolveUnknownCommand already confirms at the top level, where
+// there is no parent to preserve in the first place.
+func TestResolveNoMatchUnderDescendedNodeKeepsParentCommandAsArgs(t *testing.T) {
+	tree := testTree()
+	res := Resolve(tree, []string{"show", "bogus", "eth0"})
+	want := []string{"show"}
+	if !reflect.DeepEqual(res.FullName, want) {
+		t.Errorf("FullName = %v, want %v", res.FullName, want)
+	}
+	if res.Command != tree["show"] {
+		t.Errorf("Command = %+v, want the already matched %q command, not nil or something else", res.Command, "show")
+	}
+	wantArgs := []string{"bogus", "eth0"}
+	if !reflect.DeepEqual(res.Args, wantArgs) {
+		t.Errorf("Args = %v, want %v", res.Args, wantArgs)
+	}
+}
+
 // TestResolveEmptyTokenListsChildren - This test verifies that an empty trailing
 // token, what the completer feeds in for a trailing space such as
 // "show <TAB>", surfaces every non-hidden child as an ambiguous match
@@ -421,5 +470,149 @@ func TestCommandResolvedDescHelpArgHelp(t *testing.T) {
 	}
 	if got := n.ResolvedArgHelp(nil); got != "literal arghelp" {
 		t.Errorf("ResolvedArgHelp with a nil translator = %q, want the literal ArgHelp %q", got, "literal arghelp")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// RunnableAsIs and the "<cr>" signal
+//
+// ----------------------------------------------------------------------
+
+// noopRun is a RunFunc stand-in for tests that only care whether a
+// Command counts as runnable, never what running it actually does.
+func noopRun(*AppContext, []string) error { return nil }
+
+// runnableAsIsTestTree - This function mirrors the shape of
+// var/tree/level_user.yaml's own "totp" branch that motivated
+// RunnableAsIs in the first place: "enable" is itself a complete,
+// runnable command, exactly like real "totp enable", but it also has
+// exactly one subcommand, "qr", below it, exactly like real
+// "totp enable qr". "exit" is a plain, argumentless leaf with no
+// subcommands at all, and "length" takes a required argument.
+func runnableAsIsTestTree() map[string]*Command {
+	return map[string]*Command{
+		"totp": {
+			Subcommands: map[string]*Command{
+				"enable": {
+					RunFunc: noopRun,
+					Subcommands: map[string]*Command{
+						"qr": {RunFunc: noopRun},
+					},
+				},
+			},
+		},
+		"exit": {RunFunc: noopRun},
+		"terminal": {
+			Subcommands: map[string]*Command{
+				"length": {RunFunc: noopRun, MinArgs: intPtr(1), ArgHelp: "<2-1000>"},
+			},
+		},
+	}
+}
+
+// TestResolveRunnableAsIsTrueForSatisfiedLeaf - This test verifies
+// that a plain, argumentless leaf command, typed in full with nothing
+// left over, reports RunnableAsIs true, the ordinary "<cr>" case.
+func TestResolveRunnableAsIsTrueForSatisfiedLeaf(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"exit"})
+	if !res.RunnableAsIs {
+		t.Error("RunnableAsIs = false, want true for a fully typed, argumentless leaf")
+	}
+}
+
+// TestResolveRunnableAsIsIgnoresSyntheticTrailingEmptyToken - This
+// test verifies that the synthetic "" token completer.OnChange and
+// HelpForPath's own caller append for "nothing typed yet here", a
+// trailing space after "exit", does not itself count as an unsatisfied
+// argument. Without stripping it, runnableAsIs would report "exit "
+// as not runnable the instant a trailing space appears, purely
+// because that placeholder landed in Args with nowhere else to go.
+func TestResolveRunnableAsIsIgnoresSyntheticTrailingEmptyToken(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"exit", ""})
+	if !res.RunnableAsIs {
+		t.Error("RunnableAsIs = false, want true: a trailing synthetic \"\" token is not a real argument")
+	}
+}
+
+// TestResolveRunnableAsIsFalseForUnsatisfiedMinArgs - This test
+// verifies that a leaf command requiring an argument it has not yet
+// been given, "terminal length" alone, reports RunnableAsIs false,
+// since pressing Enter right now would fail MinArgs.
+func TestResolveRunnableAsIsFalseForUnsatisfiedMinArgs(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"terminal", "length"})
+	if res.RunnableAsIs {
+		t.Error("RunnableAsIs = true, want false: MinArgs is not satisfied yet")
+	}
+}
+
+// TestResolveRunnableAsIsFalseForPureContainer - This test verifies
+// that a container command with no RunFunc of its own, "terminal", is
+// never RunnableAsIs regardless of Args, since there is nothing to run.
+func TestResolveRunnableAsIsFalseForPureContainer(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"terminal"})
+	if res.RunnableAsIs {
+		t.Error("RunnableAsIs = true, want false: a pure container has no RunFunc to run")
+	}
+}
+
+// TestResolveRunnableContainerWithSoleSubcommandStaysAmbiguousInsteadOfAutoDescending -
+// This test verifies the central "totp enable" versus "totp enable qr"
+// fix: "totp enable " followed by Tab or "?", tokens ending in a
+// trailing synthetic "", must not silently auto-complete into "qr",
+// the sole remaining subcommand, since that would hide that "enable"
+// itself is already a complete, runnable command. It must instead
+// surface through the same Ambiguous path genuine ambiguity already
+// uses, so a caller can list "qr" alongside "<cr>", both real Cisco
+// and HP show both together in exactly this situation.
+func TestResolveRunnableContainerWithSoleSubcommandStaysAmbiguousInsteadOfAutoDescending(t *testing.T) {
+	tree := runnableAsIsTestTree()
+	res := Resolve(tree, []string{"totp", "enable", ""})
+
+	wantFullName := []string{"totp", "enable"}
+	if !reflect.DeepEqual(res.FullName, wantFullName) {
+		t.Errorf("FullName = %v, want %v", res.FullName, wantFullName)
+	}
+	if want := []string{"qr"}; !reflect.DeepEqual(res.Ambiguous, want) {
+		t.Errorf("Ambiguous = %v, want %v (must not silently auto-descend into the sole subcommand)", res.Ambiguous, want)
+	}
+	if res.Command != tree["totp"].Subcommands["enable"] {
+		t.Error("Command does not point at the \"enable\" command")
+	}
+	if !res.RunnableAsIs {
+		t.Error("RunnableAsIs = false, want true: \"totp enable\" is already a complete command")
+	}
+	if res.AmbiguousTree == nil || res.AmbiguousTree["qr"] != tree["totp"].Subcommands["enable"].Subcommands["qr"] {
+		t.Error("AmbiguousTree does not point at \"enable\"'s own Subcommands map")
+	}
+}
+
+// TestResolveNonRunnableContainerWithSoleSubcommandStillAutoDescends -
+// This test verifies the fix above is scoped correctly: a container
+// with exactly one subcommand that is NOT itself runnable, "terminal"
+// here, has only ever had one meaning for a trailing Tab, descend into
+// that sole child, real Cisco and HP's own ordinary abbreviation
+// completion behavior. This must keep working exactly as before.
+func TestResolveNonRunnableContainerWithSoleSubcommandStillAutoDescends(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"terminal", ""})
+	if len(res.Ambiguous) != 0 {
+		t.Errorf("Ambiguous = %v, want none: \"terminal\" is not itself runnable, so its sole child should still auto-complete", res.Ambiguous)
+	}
+	want := []string{"terminal", "length"}
+	if !reflect.DeepEqual(res.FullName, want) {
+		t.Errorf("FullName = %v, want %v", res.FullName, want)
+	}
+}
+
+// TestResolveRunnableAsIsPartialWordAmbiguityStillReported - This test
+// verifies that a genuinely partial, ambiguous word is completely
+// unaffected by the case 1 auto-descend fix above, which only ever
+// triggers for an empty token. "t" matching both "totp" and "terminal"
+// at the top level must still report both as Ambiguous the ordinary way.
+func TestResolveRunnableAsIsPartialWordAmbiguityStillReported(t *testing.T) {
+	res := Resolve(runnableAsIsTestTree(), []string{"t"})
+	want := []string{"terminal", "totp"}
+	if !reflect.DeepEqual(res.Ambiguous, want) {
+		t.Errorf("Ambiguous = %v, want %v", res.Ambiguous, want)
 	}
 }

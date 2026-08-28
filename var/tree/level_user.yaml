@@ -1,6 +1,6 @@
 # This YAML file contains the commands for the "user" Command Level,
 # reached from the base level with "user". Reaching this level requires
-# being logged in, see cmd/cmd_user.go, since every command here acts on
+# being logged in, see cmd/core/cmd_user.go, since every command here acts on
 # the current session's own user record.
 
 commands:
@@ -15,7 +15,7 @@ commands:
         # scannable QR code. Both forms always prompt for the
         # confirmation code, never accept it as a same-line argument,
         # matching password-manager's own reasoning in
-        # cmd/cmd_password_manager.go. See cmd/cmd_totp.go.
+        # cmd/core/cmd_password_manager.go. See cmd/core/cmd_totp.go.
         run: totp.enable
         subcommands:
           qr:

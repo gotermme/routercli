@@ -113,14 +113,23 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 		// tap needed, see ambiguousTokenIsEmpty's own doc comment. A
 		// genuinely ambiguous partial word still needs the second Tab.
 		if ambiguousTokenIsEmpty(tokens, res) || l.tapCount >= 2 {
+			names := command.SortCommandNames(res.Ambiguous, res.AmbiguousTree, l.listOptions)
 			var list strings.Builder
 			list.WriteString(l.currentPrompt)
 			list.WriteString(typed)
 			list.WriteString("\n")
-			for _, candidate := range res.Ambiguous {
+			for _, candidate := range names {
 				list.WriteString(" ")
 				list.WriteString(candidate)
 				list.WriteString("\n")
+			}
+			if res.RunnableAsIs {
+				// Always last, never sorted in among the real command
+				// names, matching real Cisco and HP's own "<cr>"
+				// placement. See Resolve()'s own doc comment for why
+				// "totp enable " can be both ambiguous, "qr" is also
+				// available, and runnable as is at the same time.
+				list.WriteString(" <cr>\n")
 			}
 			fmt.Fprint(l.instance.Stdout(), list.String())
 		}
@@ -156,12 +165,30 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 	rest := string(line[pos:])
 	full := resolvedLine + rest
 
-	// Argument help hint
+	// Argument hint, "<cr>", or both together. This fires once the line
+	// has resolved to exactly one command with nothing further below
+	// it to descend into, a true leaf, len(res.Command.Subcommands) ==
+	// 0, a command with subcommands too is handled by the ambiguous
+	// branch above instead, see Resolve()'s own doc comment for why.
+	// Unlike the double Tap candidate list above, this prints on the
+	// very first trailing space, matching how this block already
+	// behaved before "<cr>" support was added here, and how
+	// HelpForPath's own equivalent case never waits for a second "?"
+	// either.
 	if trailingSpace && len(res.Args) > 0 && res.Args[len(res.Args)-1] == "" &&
-		res.Command != nil && res.Command.RunFunc != nil && len(res.Command.Subcommands) == 0 && res.Command.MinArgs != nil {
+		res.Command != nil && res.Command.RunFunc != nil && len(res.Command.Subcommands) == 0 {
 		hint := res.Command.ResolvedArgHelp(l.translator)
-		if hint != "" {
-			fmt.Fprint(l.instance.Stdout(), l.currentPrompt+typed+"\n "+hint+"\n")
+		var out string
+		switch {
+		case hint != "" && res.RunnableAsIs:
+			out = " " + hint + "\n <cr>\n"
+		case hint != "":
+			out = " " + hint + "\n"
+		case res.RunnableAsIs:
+			out = " <cr>\n"
+		}
+		if out != "" {
+			fmt.Fprint(l.instance.Stdout(), l.currentPrompt+typed+"\n"+out)
 		}
 	}
 
@@ -210,7 +237,7 @@ func (l *TreeListener) handleHelp(line []rune, pos int) (newLine []rune, newPos 
 
 	tokens, restored, restoredPos := helpTokensAndRestoredBuffer(line, pos)
 
-	help := command.HelpForPath(l.position.Current().Tree, tokens, l.translator)
+	help := command.HelpForPath(l.position.Current().Tree, tokens, l.translator, l.listOptions)
 	if help != "" {
 		fmt.Fprint(l.instance.Stdout(), l.currentPrompt+string(line[:pos-1])+"?\n"+help)
 	}

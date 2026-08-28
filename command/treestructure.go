@@ -53,7 +53,7 @@ func (t *TreeStructure) Base() *CommandLevel {
 //
 // This validates only what loading inherently requires. It does not
 // check that every level's declared EnterCommand and ExitCommand is
-// actually registered by some cmd/cmd_*.go file, that is
+// actually registered by some cmd_*.go file, that is
 // VerifyCommandLevels's job, see its own doc comment for why that
 // check lives separately. A "run:" reference inside each level's own
 // tree file is validated here, transitively, through LoadTree, but
@@ -148,6 +148,7 @@ func LoadTreeStructure(manifestPath, commonPath string) (*TreeStructure, error) 
 	if err != nil {
 		return nil, fmt.Errorf("loading common tree %s: %w", commonPath, err)
 	}
+	markCommonCommands(commonTree)
 
 	// Build the order, base first, then anything whose parent is
 	// already resolved, in whatever order that ends up being, since
@@ -208,12 +209,35 @@ func LoadTreeStructure(manifestPath, commonPath string) (*TreeStructure, error) 
 	return &TreeStructure{ByName: levels, Order: order}, nil
 }
 
+// ----------------------------------------------------------------------
+// Private Functions - Tree Structure
+// ----------------------------------------------------------------------
+
+// markCommonCommands - This function stamps IsCommonCommand true on
+// every command in tree, recursively through Subcommands. It is
+// called exactly once per program run, LoadTreeStructure's own call
+// right after LoadTree(commonPath) returns and before commonTree is
+// merged anywhere. That single call is enough for the whole program:
+// the very same *Command values loaded there are the ones MergeTrees
+// then copies its pointers from into every Command Level's own Tree,
+// so marking them once here is marking them everywhere they end up.
+// See Command.IsCommonCommand's own doc comment for what a caller
+// does with this, ListOptions.MergeCommon's ordering.
+func markCommonCommands(tree map[string]*Command) {
+	for _, cmd := range tree {
+		cmd.IsCommonCommand = true
+		if len(cmd.Subcommands) > 0 {
+			markCommonCommands(cmd.Subcommands)
+		}
+	}
+}
+
 // RequireCurrentCommandLevel - This function is the one place "you must
 // be here to go there" is actually checked. It returns an error unless
 // the session's current Command Level, whatever CommandLevelStack
 // frame is on top, root or pushed, checked through Current().Name, is
 // exactly parent.
-// Every hand-written cmd/cmd_*.go file that enters a Command Level
+// Every hand-written cmd_*.go file that enters a Command Level
 // calls this. A level reached by swapping the root frame calls it
 // indirectly through EnterCommandLevel, and a nested mode such as
 // config or config interface calls it directly. There is exactly one
@@ -249,9 +273,9 @@ func RequireCurrentCommandLevel(ctx *AppContext, target, parent string) error {
 // deliberately does not print, log, or audit anything. Whether and
 // how to tell the user that the session moved, whether to write a log
 // line or an audit entry, or to say nothing at all, is entirely the
-// calling cmd/cmd_*.go file's decision, not this framework's.
+// calling cmd_*.go file's decision, not this framework's.
 // Different projects, or even different levels in the same project,
-// may want different feedback here. See cmd/cmd_enable.go for the
+// may want different feedback here. See cmd/core/cmd_enable.go for the
 // calling convention.
 //
 // The return values distinguish four outcomes the caller needs to

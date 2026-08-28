@@ -2,6 +2,30 @@
 # reached from the "base" level with "enable".
 
 commands:
+  show:
+    desc_key: show.desc
+    subcommands:
+      interface:
+        desc_key: show.interface.desc
+        pageable: true
+        run: show.interface
+      running-config:
+        desc_key: show.running_config.desc
+        pageable: true
+        run: show.running-config
+      startup-config:
+        desc_key: show.startup_config.desc
+        pageable: true
+        run: show.startup-config
+      terminal:
+        desc_key: show.terminal.desc
+        pageable: true
+        run: show.terminal
+      version:
+        desc_key: show.version.desc
+        pageable: true
+        run: show.version
+
   disable:
     desc_key: disable.desc
     run: disable

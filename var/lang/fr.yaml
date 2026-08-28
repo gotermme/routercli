@@ -16,6 +16,7 @@ set.description.desc: "Definir la description de cette session d'exemple"
 show.desc: "Afficher les informations systeme en cours"
 show.running_config.desc: "Afficher la configuration actuelle"
 show.startup_config.desc: "Afficher la configuration de demarrage enregistree"
+show.terminal.desc: "Afficher les parametres actuels du terminal"
 show.version.desc: "Afficher les informations de version"
 enable.desc: "Elever cette session pour executer des commandes privilegiees"
 audit_log.desc: "Controler le journal d'audit"
@@ -92,6 +93,13 @@ description_if.confirm: "Description de l'interface definie."
 description_if.cleared: "Description de l'interface effacee."
 shutdown.confirm: "Interface administrativement desactivee."
 no_shutdown.confirm: "Interface administrativement activee."
+show.terminal.geometry_line: "Longueur : %d lignes, Largeur : %d colonnes"
+show.terminal.paging_line: "Pagination : %s (session), %s (globale)"
+show.terminal.filter_mode_line: "Mode de filtrage : %s"
+show.terminal.enabled: "activee"
+show.terminal.disabled: "desactivee"
+show.terminal.filter_mode_substring: "sous-chaine"
+show.terminal.filter_mode_regex: "regex"
 
 # --- Framework / runtime-loop messages ---
 help.header: "Commandes disponibles :"
@@ -101,6 +109,10 @@ runloop.not_negatable: "%q ne prend pas en charge 'no'"
 runloop.idle_timeout: "Delai d'inactivite depasse - session terminee."
 runloop.elevation_expired: "L'acces eleve a expire. Utilisez 'enable' pour vous elever a nouveau."
 runloop.eof_blocked: "Utilisez 'exit' pour quitter."
+runloop.not_pageable: "%q ne prend pas en charge le filtrage ou la pagination."
+
+# --- Invites du pageur (paquet paging) ---
+pager.more_prompt: "--Suite--"
 
 # --- Authentication prompts ---
 auth.username_prompt: "Utilisateur : "

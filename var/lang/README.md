@@ -45,7 +45,7 @@ a literal in the `desc:` and `help:` fields in the corresponding YAML file
 ## Text for Runtime Errors
 
 Runtime messages like errors, confirmations, and other text produced directly by
-a command's Go handler (e.g. "language.set.confirm" in cmd/cmd_language.go) work
+a command's Go handler (e.g. "language.set.confirm" in cmd/core/cmd_language.go) work
 differently. These have no literal option at all, and are always looked up via
 a Language Catalog entry.
 

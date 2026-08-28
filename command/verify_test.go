@@ -69,7 +69,7 @@ func TestVerifyCommandLevelsCatchesMissingEnterCommand(t *testing.T) {
 // TestVerifyCommandLevelsCatchesUnregisteredEnterCommand - This test verifies the
 // case where the manifest names a command nobody wrote. This is
 // precisely the mistake this whole check exists to catch, a typo in
-// the manifest or a forgotten cmd/cmd_*.go file, instead of it only
+// the manifest or a forgotten cmd_*.go file, instead of it only
 // surfacing the first time a user actually types the command.
 func TestVerifyCommandLevelsCatchesUnregisteredEnterCommand(t *testing.T) {
 	registerTestHandlers()

@@ -19,7 +19,7 @@ import (
 
 	"github.com/gologme/log"
 	"github.com/gotermme/routercli/auth"
-	"github.com/gotermme/routercli/cmd"
+	"github.com/gotermme/routercli/cmd/product"
 	"github.com/gotermme/routercli/command"
 )
 
@@ -193,7 +193,7 @@ func baseExecLevelsForPrompt() *command.TreeStructure {
 // State.Hostname is still empty.
 func TestBuildPromptAtBaseUsesUnprivilegedMarker(t *testing.T) {
 	ctx := &command.AppContext{
-		State:    &cmd.ExampleState{},
+		State:    &product.ProductState{},
 		Session:  &auth.Session{CommandLevel: "base"},
 		Levels:   baseExecLevelsForPrompt(),
 		Position: command.NewCommandLevelStack("base", "", nil),
@@ -211,7 +211,7 @@ func TestBuildPromptAtBaseUsesUnprivilegedMarker(t *testing.T) {
 // even though Position itself is still only one frame deep.
 func TestBuildPromptAwayFromBaseUsesPrivilegedMarker(t *testing.T) {
 	ctx := &command.AppContext{
-		State:    &cmd.ExampleState{},
+		State:    &product.ProductState{},
 		Session:  &auth.Session{CommandLevel: "exec"},
 		Levels:   baseExecLevelsForPrompt(),
 		Position: command.NewCommandLevelStack("exec", "", nil),
@@ -231,7 +231,7 @@ func TestBuildPromptAwayFromBaseUsesPrivilegedMarker(t *testing.T) {
 // Session.CommandLevel entirely.
 func TestBuildPromptNestedFrameUsesPrivilegedMarkerEvenAtBase(t *testing.T) {
 	ctx := &command.AppContext{
-		State:    &cmd.ExampleState{},
+		State:    &product.ProductState{},
 		Session:  &auth.Session{CommandLevel: "base"},
 		Levels:   baseExecLevelsForPrompt(),
 		Position: command.NewCommandLevelStack("base", "", nil),
@@ -246,11 +246,11 @@ func TestBuildPromptNestedFrameUsesPrivilegedMarkerEvenAtBase(t *testing.T) {
 }
 
 // TestBuildPromptUsesConfiguredHostnameOnceSet - This test verifies
-// that once ExampleState.Hostname is non-empty, buildPrompt shows it
+// that once ProductState.Hostname is non-empty, buildPrompt shows it
 // instead of defaultHostnamePrompt, and reads it live rather than a
 // value captured at some earlier point.
 func TestBuildPromptUsesConfiguredHostnameOnceSet(t *testing.T) {
-	state := &cmd.ExampleState{Hostname: "myrouter"}
+	state := &product.ProductState{Hostname: "myrouter"}
 	ctx := &command.AppContext{
 		State:    state,
 		Session:  &auth.Session{CommandLevel: "base"},
@@ -271,7 +271,7 @@ func TestBuildPromptUsesConfiguredHostnameOnceSet(t *testing.T) {
 // AtLevel check at all.
 func TestBuildPromptToleratesNilSessionOrLevels(t *testing.T) {
 	ctx := &command.AppContext{
-		State:    &cmd.ExampleState{},
+		State:    &product.ProductState{},
 		Position: command.NewCommandLevelStack("base", "", nil),
 	}
 	got := buildPrompt(ctx)
@@ -502,8 +502,8 @@ func TestFirstBadTokenEmptyForEmptyArgs(t *testing.T) {
 // redirected to an in-memory pipe, and returns everything fn printed,
 // restoring the real os.Stdout afterward. printOutputHeader prints
 // straight to os.Stdout rather than through an injectable writer, the
-// same as several handlers in package cmd, see that package's own
-// captureStdout helper for the same reasoning.
+// same as several handlers in cmd/core and cmd/product, see either
+// package's own captureStdout helper for the same reasoning.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	real := os.Stdout

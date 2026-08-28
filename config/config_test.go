@@ -83,6 +83,14 @@ func TestLoadSystemConfigValid(t *testing.T) {
 		EnableTOTPAuthentication: true,
 		AuthProviders:            []AuthProviderConfig{{Name: "local", Type: "local"}},
 		CLIAuthProvider:          "local",
+
+		AlphabeticalCommandOrder: true,
+		MergeCommonCommands:      true,
+
+		PagingEnabled:       true,
+		DefaultPageLines:    24,
+		FilterMatchMode:     "substring",
+		MaxFilterChainDepth: 2,
 	}
 
 	if !systemConfigsEqual(cfg, want) {
@@ -658,6 +666,30 @@ func TestDefaultSystemConfigValues(t *testing.T) {
 	if cfg.CLIAuthProvider != "local" {
 		t.Errorf("CLIAuthProvider default = %q, want %q", cfg.CLIAuthProvider, "local")
 	}
+
+	if !cfg.AlphabeticalCommandOrder {
+		t.Error("AlphabeticalCommandOrder default = false, want true (matches real Cisco and HP)")
+	}
+
+	if !cfg.MergeCommonCommands {
+		t.Error("MergeCommonCommands default = false, want true (matches real Cisco and HP)")
+	}
+
+	if !cfg.PagingEnabled {
+		t.Error("PagingEnabled default = false, want true (matches real Cisco and HP)")
+	}
+
+	if cfg.DefaultPageLines != 24 {
+		t.Errorf("DefaultPageLines default = %d, want 24", cfg.DefaultPageLines)
+	}
+
+	if cfg.FilterMatchMode != "substring" {
+		t.Errorf("FilterMatchMode default = %q, want %q", cfg.FilterMatchMode, "substring")
+	}
+
+	if cfg.MaxFilterChainDepth != 2 {
+		t.Errorf("MaxFilterChainDepth default = %d, want 2", cfg.MaxFilterChainDepth)
+	}
 }
 
 // TestDefaultSystemConfigIsValid - This test verifies that DefaultSystemConfig's
@@ -671,9 +703,10 @@ func TestDefaultSystemConfigIsValid(t *testing.T) {
 
 // TestSystemConfigValidate - This test table drives validate across LogLevel,
 // LoginMaxAttempts, TOTPMaxAttempts, PasswordMinLength,
-// PasswordChangeMaxAttempts, SessionIdleTimeout, and ElevationTimeout,
-// covering the boundary between an accepted value and a rejected one
-// for each field.
+// PasswordChangeMaxAttempts, SessionIdleTimeout, ElevationTimeout,
+// DefaultPageLines, FilterMatchMode, and MaxFilterChainDepth, covering
+// the boundary between an accepted value and a rejected one for each
+// field.
 func TestSystemConfigValidate(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -928,6 +961,101 @@ func TestSystemConfigValidate(t *testing.T) {
 					{Name: "local", Type: "local"},
 					{Name: "local", Type: "ldap"},
 				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "AlphabeticalCommandOrder true, MergeCommonCommands true, everything merged",
+			mutate: func(c *SystemConfig) {
+				c.AlphabeticalCommandOrder = true
+				c.MergeCommonCommands = true
+			},
+			wantErr: false,
+		},
+		{
+			name: "AlphabeticalCommandOrder true, MergeCommonCommands false, common commands appended",
+			mutate: func(c *SystemConfig) {
+				c.AlphabeticalCommandOrder = true
+				c.MergeCommonCommands = false
+			},
+			wantErr: false,
+		},
+		{
+			name: "AlphabeticalCommandOrder false, MergeCommonCommands false, both in tree file order",
+			mutate: func(c *SystemConfig) {
+				c.AlphabeticalCommandOrder = false
+				c.MergeCommonCommands = false
+			},
+			wantErr: false,
+		},
+		{
+			name: "AlphabeticalCommandOrder false, MergeCommonCommands true, nothing to merge into",
+			mutate: func(c *SystemConfig) {
+				c.AlphabeticalCommandOrder = false
+				c.MergeCommonCommands = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid default page lines one",
+			mutate: func(c *SystemConfig) {
+				c.DefaultPageLines = 1
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero default page lines",
+			mutate: func(c *SystemConfig) {
+				c.DefaultPageLines = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative default page lines",
+			mutate: func(c *SystemConfig) {
+				c.DefaultPageLines = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid filter match mode substring",
+			mutate: func(c *SystemConfig) {
+				c.FilterMatchMode = "substring"
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid filter match mode regex",
+			mutate: func(c *SystemConfig) {
+				c.FilterMatchMode = "regex"
+			},
+			wantErr: false,
+		},
+		{
+			name: "unrecognized filter match mode",
+			mutate: func(c *SystemConfig) {
+				c.FilterMatchMode = "fuzzy"
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid max filter chain depth zero, filtering disabled",
+			mutate: func(c *SystemConfig) {
+				c.MaxFilterChainDepth = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid max filter chain depth ten",
+			mutate: func(c *SystemConfig) {
+				c.MaxFilterChainDepth = 10
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative max filter chain depth",
+			mutate: func(c *SystemConfig) {
+				c.MaxFilterChainDepth = -1
 			},
 			wantErr: true,
 		},
@@ -1207,6 +1335,11 @@ func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 			{Name: "corp-ldap", Type: "ldap"},
 		},
 		CLIAuthProvider: "local",
+
+		PagingEnabled:       false,
+		DefaultPageLines:    40,
+		FilterMatchMode:     "regex",
+		MaxFilterChainDepth: 5,
 	}
 
 	data, err := yaml.Marshal(in)
@@ -1698,5 +1831,70 @@ func TestLoadSystemConfigBothZeroAttemptWindowPairIsNotError(t *testing.T) {
 	path := tempDirFile(t, "routercli.yaml", "")
 	if _, err := LoadSystemConfig(path); err != nil {
 		t.Errorf("expected no error when every rate limit field is left at its default, got: %v", err)
+	}
+}
+
+// TestLoadSystemConfigAlphabeticalCommandOrderAndMergeCommonCommands -
+// This test verifies every one of the four combinations these two
+// command listing ordering flags can produce, three of them a valid
+// config file, and confirms which of the three that is actually loads
+// with the given fields set, matching DefaultSystemConfig's own true,
+// true defaults when both are left unset, see
+// TestDefaultSystemConfigValues. The fourth combination,
+// AlphabeticalCommandOrder false with MergeCommonCommands true, is not
+// a valid config file at all; see
+// TestLoadSystemConfigAlphabeticalCommandOrderFalseWithMergeCommonCommandsTrueIsError
+// below for that one.
+func TestLoadSystemConfigAlphabeticalCommandOrderAndMergeCommonCommands(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		wantAlphabetical bool
+		wantMergeCommon  bool
+	}{
+		{"both left unset, everything merged into one alphabetical list", "", true, true},
+		{"MergeCommonCommands off only, non-common then common, both groups alphabetical", "MergeCommonCommands: false\n", true, false},
+		{"both off, non-common then common, both groups in their own tree file order", "AlphabeticalCommandOrder: false\nMergeCommonCommands: false\n", false, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadSystemConfig(tempDirFile(t, "routercli.yaml", tc.content))
+			if err != nil {
+				t.Fatalf("LoadSystemConfig returned unexpected error: %v", err)
+			}
+			if cfg.AlphabeticalCommandOrder != tc.wantAlphabetical {
+				t.Errorf("AlphabeticalCommandOrder = %v, want %v", cfg.AlphabeticalCommandOrder, tc.wantAlphabetical)
+			}
+			if cfg.MergeCommonCommands != tc.wantMergeCommon {
+				t.Errorf("MergeCommonCommands = %v, want %v", cfg.MergeCommonCommands, tc.wantMergeCommon)
+			}
+		})
+	}
+}
+
+// TestLoadSystemConfigAlphabeticalCommandOrderFalseWithMergeCommonCommandsTrueIsError -
+// This test verifies the one combination of these two flags that is
+// not valid: AlphabeticalCommandOrder false leaves no single combined
+// definition order across a level's own tree file and CommonTreeFile
+// for MergeCommonCommands true to merge common commands into, so
+// LoadSystemConfig rejects it as a hard error at startup rather than
+// silently falling back to the appended form, the same way an
+// unrecognized CLIAuthProvider name is rejected outright instead of
+// falling back to something plausible. Setting AlphabeticalCommandOrder
+// false with no explicit MergeCommonCommands value is enough to
+// trigger this, since MergeCommonCommands defaults to true.
+func TestLoadSystemConfigAlphabeticalCommandOrderFalseWithMergeCommonCommandsTrueIsError(t *testing.T) {
+	cases := []string{
+		"AlphabeticalCommandOrder: false\n",
+		"AlphabeticalCommandOrder: false\nMergeCommonCommands: true\n",
+	}
+
+	for _, content := range cases {
+		path := tempDirFile(t, "routercli.yaml", content)
+
+		if _, err := LoadSystemConfig(path); err == nil {
+			t.Errorf("expected an error for AlphabeticalCommandOrder false with MergeCommonCommands true in %q, got nil", content)
+		}
 	}
 }

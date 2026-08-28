@@ -75,7 +75,7 @@ func (m *CommandLevelStack) Depth() int {
 // SetRootTree - This method replaces the root frame's Name,
 // PromptSuffix, and Tree together, in place, without touching the rest
 // of the stack. A command such as "enable" or "disable", registered by
-// a hand-written cmd/cmd_*.go file through EnterCommandLevel or
+// a hand-written cmd_*.go file through EnterCommandLevel or
 // ExitCommandLevel in command/treestructure.go, uses this to switch
 // which commands are available at the top level. This is deliberately
 // not a Push. Pushing a new frame instead would give plain "exit" a

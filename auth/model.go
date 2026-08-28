@@ -97,9 +97,9 @@ type KeyedRateLimiter struct {
 // It is set to the base level's Name at startup by main.go, since
 // NewSession itself does not know the base level's name and so cannot
 // set this. See NewSession's own doc comment. It is then updated by
-// whichever hand-written cmd/cmd_*.go file calls
+// whichever hand-written cmd_*.go file calls
 // command.EnterCommandLevel or command.ExitCommandLevel as a session
-// moves between levels, for example cmd/cmd_enable.go. This field is
+// moves between levels, for example cmd/core/cmd_enable.go. This field is
 // only meaningful for root swap levels reached that way. A plain,
 // nested mode such as config or config-if does not touch this field
 // at all, and is tracked purely through Position, the
@@ -168,7 +168,7 @@ type yamlUsersFile struct {
 // see the Core Library Versus Implementation split documented in
 // PROGRESS.md for this project. A caller such as main.go builds one
 // of these from the loaded SystemConfig and carries it on
-// command.AppContext for cmd/cmd_password.go to use.
+// command.AppContext for cmd/core/cmd_password.go to use.
 type PasswordPolicy struct {
 	MinLength           int
 	RequireUppercase    bool
@@ -180,7 +180,7 @@ type PasswordPolicy struct {
 // failed to satisfy a PasswordPolicy, or MaxPasswordLength, see
 // ValidatePassword. It carries no message of its own, deliberately;
 // package auth has no i18n awareness anywhere else either, see
-// login.go's promptText, so a caller such as cmd/cmd_password.go maps
+// login.go's promptText, so a caller such as cmd/core/cmd_password.go maps
 // each violation to its own translated message.
 type PasswordViolation string
 
@@ -200,7 +200,7 @@ const (
 // typed username and password plugs into: today only LocalAuthProvider,
 // bcrypt hashes in a Users database, with an LDAP or a RADIUS backend
 // the kind of thing expected to implement this same interface later
-// without VerifyLogin, PromptLogin, or cmd/cmd_password.go's own
+// without VerifyLogin, PromptLogin, or cmd/core/cmd_password.go's own
 // reauthentication step needing to change at all. See
 // config.SystemConfig.AuthProviders for how a deployment names which
 // backend, of which kind, it wants, and NewAuthProvider for how a

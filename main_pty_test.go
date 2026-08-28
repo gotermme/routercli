@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,10 +22,11 @@ import (
 	"github.com/gologme/log"
 	"github.com/gotermme/routercli/auditlog"
 	"github.com/gotermme/routercli/auth"
-	"github.com/gotermme/routercli/cmd"
+	"github.com/gotermme/routercli/cmd/product"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/completer"
 	"github.com/gotermme/routercli/config"
+	"github.com/gotermme/routercli/paging"
 )
 
 // ----------------------------------------------------------------------
@@ -77,9 +79,9 @@ func sendLine(t *testing.T, w io.Writer, s string) {
 // throws away everything written to it, for constructing a real
 // *auditlog.AuditLog in a test that cares about the audit trail
 // itself, not anything the AuditLog's own internal logger would
-// report. Mirrors cmd/cmd_audit_test.go's own newTestAuditor helper,
-// which cannot be reused directly here since it lives in a different
-// package.
+// report. Mirrors cmd/core/cmd_audit_test.go's own newTestAuditor
+// helper, which cannot be reused directly here since it lives in a
+// different package.
 func discardAuditLogger() *log.Logger {
 	return log.New(io.Discard, "", 0)
 }
@@ -519,7 +521,7 @@ func newPTYReadline(t *testing.T, tree map[string]*command.Command) (*readline.I
 		t.Fatalf("failed to construct a pty backed readline.Instance: %v", err)
 	}
 	t.Cleanup(func() { rl.Close() })
-	treeListener := completer.New(position, rl, logger, nil)
+	treeListener := completer.New(position, rl, logger, nil, command.DefaultListOptions())
 	rl.Config.Listener = treeListener
 	return rl, treeListener, master
 }
@@ -532,7 +534,7 @@ func runLoopTestContext(tree map[string]*command.Command) (*command.AppContext, 
 	audit := &recordingAuditor{}
 	base := &command.CommandLevel{Name: "exec", IsBase: true, Tree: tree}
 	ctx := &command.AppContext{
-		State:      &cmd.ExampleState{},
+		State:      &product.ProductState{},
 		Logger:     discardAuditLogger(),
 		Levels:     &command.TreeStructure{Order: []*command.CommandLevel{base}},
 		Audit:      audit,
@@ -639,5 +641,206 @@ func TestRunLoopDispatchesAKnownCommandAndAudits(t *testing.T) {
 	}
 	if !audit.hasEntry("hello") {
 		t.Errorf("expected an audit entry for \"hello\", got %+v", audit.entries)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// runLoop - pipe filtering and paging dispatch
+//
+// ----------------------------------------------------------------------
+
+// runLoopCapturingStdout - This function runs runLoop to completion on
+// its own goroutine, with the real, process wide os.Stdout captured
+// for the duration through captureStdout, main_test.go's own helper,
+// and returns a channel carrying everything printed. A pty backed
+// command line is read through master and slave exactly as every
+// other runLoop test in this file already does, see newPTYReadline;
+// what is different here is only where each dispatched command's own
+// output actually lands. Every handler in this project, and
+// dispatchPageable's own final paging.Display call alongside it,
+// print straight to the real os.Stdout rather than through the pty or
+// through a writer carried on *command.AppContext, the same reasoning
+// cmd/stdout_test.go's own captureStdout doc comment already gives,
+// so a test that cares what a command actually printed, not just
+// whether its RunFunc ran, has to capture that real os.Stdout, not
+// read the pty's own master side, which only ever carries readline's
+// own prompt and terminal echo.
+func runLoopCapturingStdout(t *testing.T, rl *readline.Instance, treeListener *completer.TreeListener, ctx *command.AppContext) <-chan string {
+	ch := make(chan string, 1)
+	go func() {
+		ch <- captureStdout(t, func() {
+			runLoop(rl, treeListener, ctx, runLoopOptions{})
+		})
+	}()
+	return ch
+}
+
+// awaitRunLoopOutput - This function waits for ch, failing the test
+// rather than hanging forever if runLoopCapturingStdout's own runLoop
+// call never returns within timeout.
+func awaitRunLoopOutput(t *testing.T, ch <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case out := <-ch:
+		return out
+	case <-time.After(timeout):
+		t.Fatal("runLoop did not return in time")
+		return ""
+	}
+}
+
+// pageableTestContext - This function is runLoopTestContext's own
+// counterpart for the tests in this section, adding the four paging
+// related AppContext fields runLoopTestContext itself leaves at their
+// zero value, PagingEnabled false, MaxFilterChainDepth 0, so a test
+// that actually needs piping and paging enabled does not have to
+// duplicate runLoopTestContext's own setup. FilterMode is left at its
+// zero value, FilterModeSubstring, the default this project's own
+// config.DefaultSystemConfig ships.
+func pageableTestContext(tree map[string]*command.Command, maxFilterChainDepth int) (*command.AppContext, *recordingAuditor) {
+	ctx, audit := runLoopTestContext(tree)
+	ctx.MaxFilterChainDepth = maxFilterChainDepth
+	ctx.PagingEnabled = true
+	ctx.DefaultPageLines = 24
+	return ctx, audit
+}
+
+// TestRunLoopAppliesPipeFilterToPageableCommandOutput - This test
+// verifies runLoop's own real dispatch wiring, not paging.ApplyFilters
+// in isolation: a Pageable command's three lines of output, piped
+// through "| include beta", reach the real pty with only the matching
+// line present, confirming SplitPipeline, ParseStages,
+// dispatchPageable, and paging.CaptureOutput all actually connect to
+// each other the way main.go's own runLoop wires them, not merely
+// each independently correct on its own, see paging/filter_test.go
+// for ApplyFilters' own exhaustive matching behavior instead.
+func TestRunLoopAppliesPipeFilterToPageableCommandOutput(t *testing.T) {
+	tree := map[string]*command.Command{
+		"list": {
+			Pageable: true,
+			RunFunc: func(ctx *command.AppContext, args []string) error {
+				fmt.Println("alpha")
+				fmt.Println("beta")
+				fmt.Println("gamma")
+				return nil
+			},
+		},
+		"quit": {RunFunc: func(ctx *command.AppContext, args []string) error { return command.ErrQuit }},
+	}
+	rl, treeListener, master := newPTYReadline(t, tree)
+	ctx, _ := pageableTestContext(tree, 2)
+	outCh := runLoopCapturingStdout(t, rl, treeListener, ctx)
+
+	sendLine(t, master, "list | include beta")
+	sendLine(t, master, "quit")
+	out := awaitRunLoopOutput(t, outCh, 5*time.Second)
+
+	if !strings.Contains(out, "beta") {
+		t.Errorf("expected filtered output to include \"beta\", got:\n%s", out)
+	}
+	if strings.Contains(out, "alpha") || strings.Contains(out, "gamma") {
+		t.Errorf("expected \"| include beta\" to drop every other line, got:\n%s", out)
+	}
+}
+
+// TestRunLoopRejectsPipeOnNonPageableCommand - This test verifies the
+// gate runLoop's own default case applies before dispatch: a filter
+// typed against a command that was never marked Pageable is refused
+// with "runloop.not_pageable" and the command's own RunFunc never
+// runs at all, rather than the pipe being silently ignored and the
+// command run unfiltered.
+func TestRunLoopRejectsPipeOnNonPageableCommand(t *testing.T) {
+	ran := false
+	tree := map[string]*command.Command{
+		"hello": {RunFunc: func(ctx *command.AppContext, args []string) error { ran = true; return nil }},
+		"quit":  {RunFunc: func(ctx *command.AppContext, args []string) error { return command.ErrQuit }},
+	}
+	rl, treeListener, master := newPTYReadline(t, tree)
+	ctx, audit := pageableTestContext(tree, 2)
+	outCh := runLoopCapturingStdout(t, rl, treeListener, ctx)
+
+	sendLine(t, master, "hello | include x")
+	sendLine(t, master, "quit")
+	out := awaitRunLoopOutput(t, outCh, 5*time.Second)
+
+	if ran {
+		t.Error("expected \"hello\"'s RunFunc to never run when piped against a non-Pageable command")
+	}
+	if audit.hasEntry("hello") {
+		t.Errorf("expected no audit entry for a rejected, never run \"hello\", got %+v", audit.entries)
+	}
+	if !strings.Contains(out, "[[runloop.not_pageable]]") {
+		t.Errorf("expected the not_pageable message, got:\n%s", out)
+	}
+}
+
+// TestRunLoopRejectsFilterChainDeeperThanMaxFilterChainDepth - This
+// test verifies config.SystemConfig.MaxFilterChainDepth's own
+// security limit is actually enforced by runLoop before a command is
+// ever resolved or run: with MaxFilterChainDepth 2, a third chained
+// filter is refused outright, and the underlying command's own
+// RunFunc never runs, matching this project's own design decision
+// that too deep a filter chain is a real, reported error, never
+// silently truncated or run anyway.
+func TestRunLoopRejectsFilterChainDeeperThanMaxFilterChainDepth(t *testing.T) {
+	ran := false
+	tree := map[string]*command.Command{
+		"list": {
+			Pageable: true,
+			RunFunc:  func(ctx *command.AppContext, args []string) error { ran = true; return nil },
+		},
+		"quit": {RunFunc: func(ctx *command.AppContext, args []string) error { return command.ErrQuit }},
+	}
+	rl, treeListener, master := newPTYReadline(t, tree)
+	ctx, _ := pageableTestContext(tree, 2)
+	outCh := runLoopCapturingStdout(t, rl, treeListener, ctx)
+
+	sendLine(t, master, "list | include a | include b | include c")
+	sendLine(t, master, "quit")
+	out := awaitRunLoopOutput(t, outCh, 5*time.Second)
+
+	if ran {
+		t.Error("expected \"list\"'s RunFunc to never run when its own filter chain exceeds MaxFilterChainDepth")
+	}
+	if !strings.Contains(out, "too many filters") {
+		t.Errorf("expected a \"too many filters\" error, got:\n%s", out)
+	}
+}
+
+// TestRunLoopFilterModeRegexAppliesToPipedOutput - This test verifies
+// that ctx.FilterMode is actually consulted by runLoop's own dispatch,
+// not just paging.ApplyFilters in isolation: with FilterMode set to
+// paging.FilterModeRegex, "| include eth[0-9]$" matches through a real
+// regular expression, keeping "eth0" and "eth1" but not "gi0/1", which
+// a literal substring match against the same pattern could never do,
+// since "[0-9]$" is not a literal substring of any of these lines.
+func TestRunLoopFilterModeRegexAppliesToPipedOutput(t *testing.T) {
+	tree := map[string]*command.Command{
+		"list": {
+			Pageable: true,
+			RunFunc: func(ctx *command.AppContext, args []string) error {
+				fmt.Println("interface eth0")
+				fmt.Println("interface eth1")
+				fmt.Println("interface gi0/1")
+				return nil
+			},
+		},
+		"quit": {RunFunc: func(ctx *command.AppContext, args []string) error { return command.ErrQuit }},
+	}
+	rl, treeListener, master := newPTYReadline(t, tree)
+	ctx, _ := pageableTestContext(tree, 2)
+	ctx.FilterMode = paging.FilterModeRegex
+	outCh := runLoopCapturingStdout(t, rl, treeListener, ctx)
+
+	sendLine(t, master, `list | include eth[0-9]$`)
+	sendLine(t, master, "quit")
+	out := awaitRunLoopOutput(t, outCh, 5*time.Second)
+
+	if !strings.Contains(out, "eth0") || !strings.Contains(out, "eth1") {
+		t.Errorf("expected the regex filtered output to include both eth0 and eth1, got:\n%s", out)
+	}
+	if strings.Contains(out, "gi0/1") {
+		t.Errorf("expected \"gi0/1\" to be filtered out by the regex pattern, got:\n%s", out)
 	}
 }

@@ -1,0 +1,339 @@
+// Copyright 2026 Bret Jordan, All rights reserved.
+//
+// Use of this source code is governed by an Apache 2.0 license
+// that can be found in the LICENSE file in the root of the source tree.
+
+package product
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	_ "github.com/gotermme/routercli/cmd/core"
+	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/i18n"
+	"github.com/gotermme/routercli/tokenize"
+)
+
+// TestShowStartupConfigHandlerReturnsNoError - This test verifies
+// that "show startup-config" runs without error, the same minimum
+// guarantee as show.version in cmd/core.
+func TestShowStartupConfigHandlerReturnsNoError(t *testing.T) {
+	ctx := newTestContext()
+	cmd := loadTestCommand(t, "show.startup-config")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Errorf("show.startup-config handler returned unexpected error: %v", err)
+	}
+}
+
+// TestShowInterfaceHandlerNoInterfacesConfigured - This test verifies
+// that "show interface" with no interfaces ever touched prints the
+// "nothing configured" text rather than an empty listing or an
+// error.
+func TestShowInterfaceHandlerNoInterfacesConfigured(t *testing.T) {
+	ctx := newTestContext()
+	cmd := loadTestCommand(t, "show.interface")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, nil) })
+	if runErr != nil {
+		t.Errorf("show.interface handler returned unexpected error: %v", runErr)
+	}
+	if out == "" {
+		t.Error("expected show.interface to print something when no interfaces are configured")
+	}
+}
+
+// TestShowInterfaceHandlerListsConfiguredInterfacesInSortedOrder -
+// This test verifies that "show interface" lists every interface that
+// has been touched, each with its shutdown status and description
+// when set, in sorted order regardless of Go's randomized map
+// iteration, exercising sortedInterfaceNames through the handler.
+func TestShowInterfaceHandlerListsConfiguredInterfacesInSortedOrder(t *testing.T) {
+	ctx := newTestContext()
+	// T() on a nil Translator, newTestContext's default, drops any
+	// format args rather than applying them, see i18n.Translator.T's
+	// own doc comment, so a real Translator with a minimal catalog is
+	// needed here to actually see the interpolated description text
+	// in the captured output.
+	ctx.Translator = i18n.New(map[string]i18n.Catalog{
+		"en": {"show.interface.description_label": "Description: %s"},
+	}, "en", "en")
+	state := ctx.State.(*ProductState)
+	state.Interface("eth1").Shutdown = true
+	state.Interface("eth0").Description = "uplink"
+	cmd := loadTestCommand(t, "show.interface")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, nil) })
+	if runErr != nil {
+		t.Errorf("show.interface handler returned unexpected error: %v", runErr)
+	}
+
+	eth0At := strings.Index(out, "eth0")
+	eth1At := strings.Index(out, "eth1")
+	if eth0At == -1 || eth1At == -1 {
+		t.Fatalf("expected both eth0 and eth1 to appear in output, got %q", out)
+	}
+	if eth0At > eth1At {
+		t.Errorf("expected eth0 to be listed before eth1 (sorted order), got %q", out)
+	}
+	if !strings.Contains(out, "uplink") {
+		t.Errorf("expected eth0's description %q to appear, got %q", "uplink", out)
+	}
+}
+
+// TestShowRunningConfigHandlerIncludesEveryConfiguredValue - This
+// test verifies that "show running-config" reflects the hostname,
+// description, and per-interface state that has actually been set,
+// exercising printRunningConfig end to end through the registered
+// handler, the same way a real "show running-config" on the device
+// would.
+func TestShowRunningConfigHandlerIncludesEveryConfiguredValue(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	state := ctx.State.(*ProductState)
+	state.Hostname = "myrouter"
+	state.Description = "a lab router"
+	state.Interface("eth0").Description = "uplink"
+	state.Interface("eth1").Shutdown = true
+	cmd := loadTestCommand(t, "show.running-config")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, nil) })
+	if runErr != nil {
+		t.Fatalf("show.running-config handler returned unexpected error: %v", runErr)
+	}
+
+	for _, want := range []string{"myrouter", "a lab router", "eth0", "uplink", "eth1", "shutdown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show running-config output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestShowRunningConfigHandlerOmitsNeverConfiguredValues - This test
+// verifies the companion case: a freshly constructed ProductState with
+// nothing ever set produces output with none of hostname, description,
+// or terminal geometry lines, matching how a real device only shows
+// config lines for values that have actually been configured.
+func TestShowRunningConfigHandlerOmitsNeverConfiguredValues(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	cmd := loadTestCommand(t, "show.running-config")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, nil) })
+	if runErr != nil {
+		t.Fatalf("show.running-config handler returned unexpected error: %v", runErr)
+	}
+	for _, unwanted := range []string{"hostname", "terminal width", "set description"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("show running-config output unexpectedly contains %q for an unconfigured value, got:\n%s", unwanted, out)
+		}
+	}
+}
+
+// loadTestTree - This function resolves an entire tree, rather than
+// loadTestCommand's single command, by writing yamlBody to a
+// throwaway tree file and loading it through command.LoadTree, the
+// same loader main.go uses at startup. See loadTestCommand's own doc
+// comment in testhelpers_test.go for why a real file, not a directly
+// constructed map, is used here too: this exercises the exact same
+// "run:" resolution path a real tree file goes through.
+func loadTestTree(t *testing.T, yamlBody string) map[string]*command.Command {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tree.yaml")
+	if err := os.WriteFile(path, []byte(yamlBody), 0644); err != nil {
+		t.Fatalf("failed to write test tree file: %v", err)
+	}
+	tree, err := command.LoadTree(path)
+	if err != nil {
+		t.Fatalf("LoadTree returned error: %v", err)
+	}
+	return tree
+}
+
+// replayConfigLines - This function feeds lines back through the
+// exact same tokenize, resolve, validate, run sequence main.go's
+// runLoop uses for anything typed at a real prompt, against whichever
+// Command Level ctx.Position.Current() happens to be at the time,
+// exactly what actually happens when a person pastes text into a live
+// session. A line that is empty, or a Cisco style "!" comment line,
+// such as runningConfigLines' own header and trailing separator, is
+// skipped rather than sent through resolution, the same way a real
+// terminal treats a blank or comment line as nothing to run.
+func replayConfigLines(t *testing.T, ctx *command.AppContext, lines []string) {
+	t.Helper()
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "!") {
+			continue
+		}
+		tokens, terr := tokenize.Tokenize(line)
+		if terr != nil {
+			t.Fatalf("failed to tokenize replayed line %q: %v", line, terr)
+		}
+		res := command.Resolve(ctx.Position.Current().Tree, tokens)
+		if res.Command == nil || res.Command.RunFunc == nil {
+			t.Fatalf("replayed line %q did not resolve to a runnable command while at Command Level %q", line, ctx.Position.Current().Name)
+		}
+		if !res.Negated {
+			if verr := command.ValidateArgs(res.Command, res.Args); verr != nil {
+				t.Fatalf("replayed line %q failed argument validation: %v", line, verr)
+			}
+		}
+		ctx.Negated = res.Negated
+		runErr := res.Command.RunFunc(ctx, res.Args)
+		ctx.Negated = false
+		if runErr != nil {
+			t.Fatalf("replayed line %q returned an error: %v", line, runErr)
+		}
+	}
+}
+
+// showRoundTripLevels - This function builds a real, working three
+// level Command Level Tree, exec, config, and config-if, the same
+// shape var/tree/tree_structure.yaml declares, loading each level's
+// own tree through command.LoadTree rather than constructing Command
+// values by hand, so TestShowRunningConfigOutputReplaysBackToTheSameState
+// below exercises the real, registered "configure.terminal",
+// "hostname", "interface", "description.interface",
+// "interface.shutdown", "terminal.length", "terminal.width", and
+// "set.description" handlers, alongside "exit" and "end" from
+// cmd/core/cmd_mode_control.go, not stand-ins for them.
+// "configure.terminal", "terminal.length", "terminal.width", "exit",
+// and "end" are registered by cmd/core, this file's own blank import
+// of that package, rather than by this package itself.
+func showRoundTripLevels(t *testing.T) *command.TreeStructure {
+	execTree := loadTestTree(t, `commands:
+  configure:
+    subcommands:
+      terminal:
+        run: configure.terminal
+  set:
+    subcommands:
+      description:
+        minargs: 1
+        maxargs: 1
+        run: set.description
+`)
+	configTree := loadTestTree(t, `commands:
+  hostname:
+    minargs: 1
+    maxargs: 1
+    negatable: true
+    run: hostname
+  interface:
+    minargs: 1
+    maxargs: 1
+    run: interface
+  terminal:
+    subcommands:
+      length:
+        minargs: 1
+        maxargs: 1
+        run: terminal.length
+      width:
+        minargs: 1
+        maxargs: 1
+        run: terminal.width
+  exit:
+    run: exit
+  end:
+    run: end
+`)
+	configIfTree := loadTestTree(t, `commands:
+  description:
+    minargs: 1
+    maxargs: 1
+    negatable: true
+    run: description.interface
+  shutdown:
+    negatable: true
+    run: interface.shutdown
+  exit:
+    run: exit
+  end:
+    run: end
+`)
+
+	return &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"exec":      {Name: "exec", Tree: execTree},
+		"config":    {Name: "config", Parent: "exec", PromptSuffix: "(config)", EnterCommand: "configure.terminal", Tree: configTree},
+		"config-if": {Name: "config-if", Parent: "config", PromptSuffix: "(config-if)", EnterCommand: "interface", Tree: configIfTree},
+	}}
+}
+
+// TestShowRunningConfigOutputReplaysBackToTheSameState - This test is
+// the actual round trip promise "show running-config" makes: its own
+// output, copied out of one session and pasted back into a second,
+// fresh one starting at exec, the same place a real login session
+// lands, reproduces the exact same state. It exercises
+// runningConfigLines' own level-aware wrapping directly, confirming
+// the rendered text includes "configure terminal" before anything
+// that only exists in config mode, "exit" between the two interface
+// blocks, since cmd_interface.go refuses "interface" unless the
+// session is sitting exactly in config mode already, and "end" once
+// at the very end, then confirms replaying that exact text through
+// the real command dispatch path, the same tokenize, resolve,
+// validate, run sequence main.go's runLoop itself uses, lands on an
+// ProductState equal in every field to the one that produced it.
+func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
+	levels := showRoundTripLevels(t)
+
+	ctx := newTestContext()
+	ctx.Levels = levels
+	ctx.Position = command.NewCommandLevelStack("exec", "", levels.ByName["exec"].Tree)
+	state := ctx.State.(*ProductState)
+	state.Hostname = "myrouter"
+	state.Description = "a lab router"
+	state.Interface("eth0").Description = "uplink"
+	state.Interface("eth1").Shutdown = true
+
+	lines := runningConfigLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "configure terminal") {
+		t.Fatalf("expected rendered output to include \"configure terminal\", got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "\nexit\n") {
+		t.Fatalf("expected rendered output to back out with \"exit\" between the two interface blocks, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "\nend\n") {
+		t.Fatalf("expected rendered output to close the config block with \"end\", got:\n%s", joined)
+	}
+	if strings.Index(joined, "set description") > strings.Index(joined, "configure terminal") {
+		t.Errorf("expected the exec level \"set description\" line before \"configure terminal\", got:\n%s", joined)
+	}
+
+	replayCtx := newTestContext()
+	replayCtx.Levels = levels
+	replayCtx.Position = command.NewCommandLevelStack("exec", "", levels.ByName["exec"].Tree)
+	replayConfigLines(t, replayCtx, lines)
+	replayState := replayCtx.State.(*ProductState)
+
+	if replayState.Hostname != state.Hostname {
+		t.Errorf("replayed Hostname = %q, want %q", replayState.Hostname, state.Hostname)
+	}
+	if replayState.Description != state.Description {
+		t.Errorf("replayed Description = %q, want %q", replayState.Description, state.Description)
+	}
+	if len(replayState.Interfaces) != len(state.Interfaces) {
+		t.Fatalf("replayed Interfaces has %d entries, want %d", len(replayState.Interfaces), len(state.Interfaces))
+	}
+	for name, iface := range state.Interfaces {
+		got, ok := replayState.Interfaces[name]
+		if !ok {
+			t.Fatalf("replayed state is missing interface %q", name)
+		}
+		if got.Description != iface.Description || got.Shutdown != iface.Shutdown {
+			t.Errorf("replayed interface %q = %+v, want %+v", name, got, iface)
+		}
+	}
+	if replayCtx.Position.Current().Name != "exec" {
+		t.Errorf("expected the replayed session to land back at exec (from \"end\"), got %q", replayCtx.Position.Current().Name)
+	}
+}

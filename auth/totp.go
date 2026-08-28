@@ -145,8 +145,8 @@ func TOTPProvisioningURI(issuer, username, base32Secret string) string {
 // grouping is display only and never affects what actually gets
 // validated or stored. This is shared by both the standalone
 // enrollment utility, main.go's --mfa flag, and the totp enable
-// command in package cmd, so the two present a freshly generated
-// secret exactly the same way.
+// command in package core (cmd/core), so the two present a freshly
+// generated secret exactly the same way.
 func FormatTOTPSecretForDisplay(secret string) string {
 	var b strings.Builder
 	for i, r := range secret {

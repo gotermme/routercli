@@ -17,14 +17,86 @@ import (
 // Public Functions - Help
 // ----------------------------------------------------------------------
 
+// SortCommandNames - This function orders names, every one of them
+// assumed to be a key of tree, the way a listing of more than one
+// command side by side should actually be presented, driven by opts.
+// HelpText, and both of package completer's own print paths, the Tab
+// completion ambiguous candidate list and "?"'s own word-help bare
+// name list, funnel through this, so a listing's order is controlled
+// by the same two settings no matter which of those three paths
+// produced it, see ListOptions's own doc comment for what each one
+// means.
+//
+// names is never mutated; a new, sorted slice is always returned.
+//
+// When opts.Alphabetical is true, the default, this sorts by name,
+// except that when opts.MergeCommon is false, every command with
+// IsCommonCommand true sorts after every command without it, still
+// alphabetical within each of those two groups. When opts.Alphabetical
+// is false, this sorts by DefIndex instead, but always with that same
+// non-common-before-common grouping regardless of MergeCommon:
+// DefIndex is only ever comparable between two commands that came from
+// the very same source file, and MergeCommon's own "merged" form has
+// no sensible meaning to give two separate files' own definition
+// order, there is no true combined "definition order" across
+// var/tree/level_common.yaml and a level's own tree file the way there
+// is one true alphabetical order across both, so definition order
+// always keeps them apart, own commands from a level's own tree file
+// before common commands from level_common.yaml, the same way it
+// already reads on the page for anyone comparing the two files
+// directly.
+//
+// A name with no matching entry in tree, which should not happen in
+// practice, sorts as neither common nor first by DefIndex, and simply
+// compares by its own name against anything else in the same
+// situation, so a caller passing a stale or mismatched tree still gets
+// a stable, sensible order rather than a panic.
+func SortCommandNames(names []string, tree map[string]*Command, opts ListOptions) []string {
+	sorted := append([]string(nil), names...)
+
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ni, nj := sorted[i], sorted[j]
+		ci, cj := tree[ni], tree[nj]
+
+		commonI := ci != nil && ci.IsCommonCommand
+		commonJ := cj != nil && cj.IsCommonCommand
+
+		// Definition order always separates the two groups, and so
+		// does alphabetical order when common commands are being
+		// appended rather than merged, see this function's own doc
+		// comment for why. Alphabetical-and-merged, this project's own
+		// default, is the one combination that never partitions here.
+		if (!opts.Alphabetical || !opts.MergeCommon) && commonI != commonJ {
+			return !commonI
+		}
+
+		if !opts.Alphabetical {
+			di, dj := 0, 0
+			if ci != nil {
+				di = ci.DefIndex
+			}
+			if cj != nil {
+				dj = cj.DefIndex
+			}
+			if di != dj {
+				return di < dj
+			}
+		}
+
+		return ni < nj
+	})
+
+	return sorted
+}
+
 // HelpText - This function builds a listing of the commands reachable
 // at one level of the tree, the level passed in and nothing below it,
 // skipping Hidden nodes entirely, since a hidden command must not
 // appear here any more than it appears in tab completion. This lives in
 // package command rather than in the "help" command's own file in
-// package cmd because it is a property of the tree data structure
-// itself, not of any one command's behavior, so a different command set
-// gets the same listing logic for free.
+// cmd/core because it is a property of the tree data structure itself,
+// not of any one command's behavior, so a different command set gets
+// the same listing logic for free.
 //
 // This is deliberately one level deep, not a recursive walk of the
 // whole tree, matching real Cisco and HP behavior. "help" at the top
@@ -47,18 +119,23 @@ import (
 // "help.header" key.
 //
 // Output is column aligned on the command name so descriptions line up,
-// and sorted alphabetically so the listing stays stable between runs,
-// since Go's map iteration order is randomized.
-func HelpText(tree map[string]*Command, t *i18n.Translator) string {
-	var entries []helpEntry
+// and always ordered the same way between runs, since Go's map
+// iteration order is randomized, driven by opts, see SortCommandNames,
+// which does the actual ordering.
+func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions) string {
+	var names []string
 	for name, cmd := range tree {
 		if cmd.Hidden {
 			continue
 		}
-		entries = append(entries, helpEntry{name, cmd.ResolvedDesc(t)})
+		names = append(names, name)
 	}
+	names = SortCommandNames(names, tree, opts)
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+	entries := make([]helpEntry, len(names))
+	for i, name := range names {
+		entries[i] = helpEntry{name, tree[name].ResolvedDesc(t)}
+	}
 
 	longest := 0
 	for _, e := range entries {
@@ -106,10 +183,25 @@ func HelpText(tree map[string]*Command, t *i18n.Translator) string {
 // "<cr>" if not, matching real Cisco's own notation for "you can press
 // enter here".
 //
+// A "<cr>" line, always last, never sorted in among any other names,
+// is appended to either of the first two cases whenever res.Command
+// itself, the container these candidates or subcommands belong to, is
+// already directly runnable as typed so far, see
+// ResolveResult.RunnableAsIs. This is the same "totp enable" versus
+// "totp enable qr" situation Resolve()'s own doc comment describes:
+// "totp enable ?" needs to show both "qr" and "<cr>" together, since
+// pressing Enter right there already runs a complete command, but
+// there is also more that could still be typed.
+//
+// opts controls how more than one name is ordered within either
+// listing, see ListOptions's own doc comment and SortCommandNames,
+// which does the actual ordering; "<cr>" itself is never subject to
+// opts, it is always last.
+//
 // This returns an empty string if the tokens do not resolve to anything
 // at all, such as "bogus-command ?". A caller treats that as nothing to
 // show.
-func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator) string {
+func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, opts ListOptions) string {
 	if len(tokens) == 0 {
 		tokens = []string{""}
 	}
@@ -129,45 +221,59 @@ func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator) 
 		if res.Negated {
 			ambigIdx++
 		}
-		if ambigIdx >= 0 && ambigIdx < len(tokens) && tokens[ambigIdx] == "" {
-			// Full help, nothing typed yet for this position. Walk
-			// res.FullName, everything already resolved and
-			// unambiguous, down from tree to find the container these
-			// candidates actually belong to, or tree itself if
-			// FullName is empty, the bare prompt case, and list its
-			// subcommands with descriptions through HelpText, instead
+		if ambigIdx >= 0 && ambigIdx < len(tokens) && tokens[ambigIdx] == "" && res.AmbiguousTree != nil {
+			// Full help, nothing typed yet for this position: the full,
+			// described HelpText of res.AmbiguousTree, the very
+			// container res.Ambiguous's own candidates were drawn from,
+			// see ResolveResult.AmbiguousTree's own doc comment, instead
 			// of the bare names res.Ambiguous itself carries.
-			container := tree
-			for _, name := range res.FullName {
-				cmd, ok := container[name]
-				if !ok || cmd == nil {
-					container = nil
-					break
-				}
-				container = cmd.Subcommands
+			text := HelpText(res.AmbiguousTree, t, opts)
+			if res.RunnableAsIs {
+				text += "  <cr>\n"
 			}
-			if container != nil {
-				return HelpText(container, t)
-			}
+			return text
 		}
 		// Word help, a genuinely partial word: bare candidate names
 		// with no descriptions, matching real Cisco's own word help
 		// form and this project's existing tab completion convention
 		// for the same situation, see completer.go's own Ambiguous
 		// branch.
+		names := SortCommandNames(res.Ambiguous, res.AmbiguousTree, opts)
 		var b strings.Builder
-		for _, c := range res.Ambiguous {
+		for _, c := range names {
 			fmt.Fprintf(&b, " %s\n", c)
+		}
+		if res.RunnableAsIs {
+			fmt.Fprintf(&b, " <cr>\n")
 		}
 		return b.String()
 	case res.Command != nil && len(res.Command.Subcommands) > 0:
-		return HelpText(res.Command.Subcommands, t)
+		text := HelpText(res.Command.Subcommands, t, opts)
+		if res.RunnableAsIs {
+			text += "  <cr>\n"
+		}
+		return text
 	case res.Command != nil:
 		hint := res.Command.ResolvedArgHelp(t)
-		if hint == "" {
-			hint = "<cr>"
+		switch {
+		case hint != "" && res.RunnableAsIs:
+			// Optional argument: the command is already complete as
+			// typed, but more could still follow, so both the hint and
+			// "<cr>" are shown together, hint first, "<cr>" last,
+			// matching real Cisco.
+			return " " + hint + "\n <cr>\n"
+		case hint != "":
+			return " " + hint + "\n"
+		case res.RunnableAsIs:
+			return " <cr>\n"
+		default:
+			// MinArgs is not satisfied, and this command defines no
+			// ArgHelp or ArgHelpKey of its own to hint with. Showing
+			// "<cr>" here, the old behavior, would be misleading, since
+			// pressing Enter right now is not actually a complete
+			// command, so this shows nothing instead.
+			return ""
 		}
-		return " " + hint + "\n"
 	default:
 		return ""
 	}

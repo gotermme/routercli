@@ -61,7 +61,7 @@ func (t *Translator) lookup(lang, key string) (string, bool) {
 }
 
 // SetLanguage - This method switches the active language, used by the
-// runtime "language set" command, cmd/cmd_language.go. Falling back
+// runtime "language set" command, cmd/core/cmd_language.go. Falling back
 // silently to a default is fine as a constructor default, see New's own
 // doc comment, but it is wrong for an explicit runtime request, where
 // the user needs to be told either that they got what they asked for or

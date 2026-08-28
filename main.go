@@ -22,11 +22,13 @@ import (
 
 	"github.com/gotermme/routercli/auditlog"
 	"github.com/gotermme/routercli/auth"
-	"github.com/gotermme/routercli/cmd"
+	_ "github.com/gotermme/routercli/cmd/core"
+	"github.com/gotermme/routercli/cmd/product"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/completer"
 	"github.com/gotermme/routercli/config"
 	"github.com/gotermme/routercli/i18n"
+	"github.com/gotermme/routercli/paging"
 	"github.com/gotermme/routercli/tokenize"
 
 	"github.com/chzyer/readline"
@@ -121,9 +123,10 @@ func main() {
 	// now. This covers every level uniformly, root swap or nested.
 	// Nothing here names "config" or "config-if" specifically. Adding
 	// a level to tree_structure.yaml gets it loaded and validated the
-	// same way with zero code changes, beyond the one small
-	// cmd/cmd_*.go file every level's enter and exit command always
-	// needs. See command/treestructure.go's own top of file comment.
+	// same way with zero code changes, beyond the one small cmd_*.go
+	// file, in cmd/core or cmd/product, every level's enter and exit
+	// command always needs. See command/treestructure.go's own top of
+	// file comment.
 
 	// A command whose own feature is turned off in configuration is
 	// pruned out of every level's Tree entirely, right here, before
@@ -157,12 +160,12 @@ func main() {
 	// function, the same separation of concerns VerifyCommandLevels, a
 	// few lines below, already follows. Every level gets a RateLimiter
 	// unconditionally, even one with no PasswordHash set right now,
-	// since "password manager", cmd/cmd_password_manager.go, can set
-	// one at any time while the program is running, and the limiter
-	// needs to already be there, ready, the moment that happens.
-	// Per-command limiters are narrower, only commands that already
-	// have a PasswordHash at load time get one, since, unlike a
-	// Command Level's secret, nothing in this project currently sets
+	// since "password manager", cmd/core/cmd_password_manager.go, can
+	// set one at any time while the program is running, and the
+	// limiter needs to already be there, ready, the moment that
+	// happens. Per-command limiters are narrower, only commands that
+	// already have a PasswordHash at load time get one, since, unlike
+	// a Command Level's secret, nothing in this project currently sets
 	// Command.PasswordHash after the tree is loaded.
 	for _, level := range levels.Order {
 		level.RateLimiter = auth.NewRateLimiter(config.CommandLevelMaxAttempts, config.CommandLevelAttemptWindow.AsDuration(), config.CommandLevelLockoutDuration.AsDuration())
@@ -173,9 +176,10 @@ func main() {
 	// doc comment for why. It confirms every level's declared
 	// enter_command and exit_command actually correspond to a real,
 	// registered command, meaning someone really did write the
-	// cmd/cmd_*.go file the manifest expects, catching a typo or a
-	// forgotten file right here instead of the first time a user types
-	// the command and gets "unknown command". This runs
+	// cmd_*.go file, in cmd/core or cmd/product, the manifest expects,
+	// catching a typo or a forgotten file right here instead of the
+	// first time a user types the command and gets "unknown command".
+	// This runs
 	// unconditionally, not just under --check-config, matching this
 	// project's own convention that a broken configuration fails
 	// loudly at startup.
@@ -222,7 +226,7 @@ func main() {
 	session.CommandLevel = base.Name
 
 	ctx := &command.AppContext{
-		State:      &cmd.ExampleState{},
+		State:      &product.ProductState{},
 		Logger:     logger,
 		Levels:     levels,
 		Audit:      audit,
@@ -233,6 +237,32 @@ func main() {
 		// whatever tree_structure.yaml actually names the base level.
 		Position: command.NewCommandLevelStack(base.Name, base.PromptSuffix, base.Tree),
 		Session:  session,
+		// Built once from config, here, and reused everywhere a
+		// listing of more than one command name gets ordered: this
+		// AppContext.ListOptions, the completer.New call below, and
+		// the non-interactive "?" fallback further down runLoop, so
+		// all three always agree. See command.ListOptions's own doc
+		// comment.
+		ListOptions: command.ListOptions{
+			Alphabetical: config.AlphabeticalCommandOrder,
+			MergeCommon:  config.MergeCommonCommands,
+		},
+		// PageLines starts nil, unset, matching real Cisco's own
+		// terminal length, session only, never seeded from a
+		// configuration file. DefaultPageLines, PagingEnabled, and
+		// FilterMode's own startup value all come from config here,
+		// the one place that already knows them, rather than reread
+		// from config a second time anywhere paging.EffectivePageLines
+		// or paging.Display are actually called. filterModeFromConfig
+		// converts config.FilterMatchMode's plain YAML string into
+		// package paging's own typed FilterMode here, in main.go,
+		// keeping package config free of any dependency on package
+		// paging, the same boundary this project already keeps
+		// between package config and package command or auth.
+		DefaultPageLines:    config.DefaultPageLines,
+		PagingEnabled:       config.PagingEnabled,
+		FilterMode:          filterModeFromConfig(config.FilterMatchMode),
+		MaxFilterChainDepth: config.MaxFilterChainDepth,
 	}
 
 	if config.AuthRequired {
@@ -257,7 +287,7 @@ func main() {
 		// ctx.AuthProvider is only built when EnableCLIAuthentication is
 		// actually on, since it is only ever consulted by
 		// auth.PromptLogin's own credential check, inside
-		// establishSession below, and by cmd/cmd_password.go's password
+		// establishSession below, and by cmd/core/cmd_password.go's password
 		// change re-authentication step. That password change command
 		// itself sets requires: password_change, so it is pruned out of
 		// the tree entirely whenever EnableCLIAuthentication is off,
@@ -323,7 +353,7 @@ func main() {
 	}
 	defer rl.Close()
 
-	treeListener := completer.New(ctx.Position, rl, logger, ctx.Translator)
+	treeListener := completer.New(ctx.Position, rl, logger, ctx.Translator, ctx.ListOptions)
 	treeListener.SetPrompt(buildPrompt(ctx))
 	rl.Config.Listener = treeListener
 
@@ -469,8 +499,9 @@ func establishSession(cfg config.SystemConfig, users auth.Users, provider auth.A
 
 // defaultHostnamePrompt - This constant is what the prompt shows
 // before "hostname" has ever been set, or after "no hostname" resets
-// it, matching cmd.defaultHostname (cmd/cmd_hostname.go). It is kept
-// as a separate constant here rather than importing that one because
+// it, matching product.defaultHostname (cmd/product/cmd_hostname.go),
+// an unexported constant this file cannot reach directly. It is kept
+// as a separate constant here rather than exporting that one because
 // this is purely a display fallback, not the same value the framework
 // treats as canonical.
 const defaultHostnamePrompt = "router"
@@ -483,15 +514,16 @@ const defaultHostnamePrompt = "router"
 // inside a nested Command Level at all.
 //
 // The hostname portion reads
-// ctx.State.(*cmd.ExampleState).Hostname live, so "hostname myrouter"
-// immediately rewrites the prompt on the very next redraw. runLoop
-// already calls this after every dispatch specifically so a command
-// like this is reflected right away, not just remembered for next
-// time. It falls back to defaultHostnamePrompt when Hostname is
+// ctx.State.(*product.ProductState).Hostname live, so "hostname
+// myrouter" immediately rewrites the prompt on the very next redraw.
+// runLoop already calls this after every dispatch specifically so a
+// command like this is reflected right away, not just remembered for
+// next time. It falls back to defaultHostnamePrompt when Hostname is
 // empty, which is exactly the state "no hostname" leaves it in, see
-// cmd/cmd_hostname.go, so the fallback only ever shows up before a
-// hostname has been set, or after it has been explicitly cleared,
-// never as a silent default that masks a real configured value.
+// cmd/product/cmd_hostname.go, so the fallback only ever shows up
+// before a hostname has been set, or after it has been explicitly
+// cleared, never as a silent default that masks a real configured
+// value.
 func buildPrompt(ctx *command.AppContext) string {
 	frame := ctx.Position.Current()
 	awayFromBase := false
@@ -504,7 +536,7 @@ func buildPrompt(ctx *command.AppContext) string {
 	}
 
 	host := defaultHostnamePrompt
-	if state, ok := ctx.State.(*cmd.ExampleState); ok && state.Hostname != "" {
+	if state, ok := ctx.State.(*product.ProductState); ok && state.Hostname != "" {
 		host = state.Hostname
 	}
 
@@ -533,7 +565,7 @@ func buildPrompt(ctx *command.AppContext) string {
 // mode.
 //
 // Program termination is driven by command.ErrQuit, not by matching
-// the name "exit". See cmd/cmd_mode_control.go's doc comment for why
+// the name "exit". See cmd/core/cmd_mode_control.go's doc comment for why
 // that matters now that "exit" behaves differently depending on mode
 // depth.
 //
@@ -670,6 +702,22 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			continue
 		}
 
+		// cmdTokens is what actually gets resolved against the
+		// command tree. segments is every "| ..." stage that
+		// followed it, still raw and unparsed at this point. A line
+		// with no "|" at all leaves cmdTokens equal to tokens and
+		// segments nil, see paging.SplitPipeline. stages is checked
+		// against ctx.MaxFilterChainDepth right here, before
+		// resolution even runs, so a line asking for too many
+		// filters is refused with one clear error rather than
+		// silently truncated or evaluated anyway.
+		cmdTokens, segments := paging.SplitPipeline(tokens)
+		stages, perr := paging.ParseStages(segments, ctx.MaxFilterChainDepth)
+		if perr != nil {
+			fmt.Printf("%% %v\n", perr)
+			continue
+		}
+
 		// Defensive, non-interactive "?" fallback. Normally,
 		// readline.Listener's key == '?' branch, completer.go's
 		// handleHelp, already intercepts '?' before it ever reaches
@@ -680,16 +728,19 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 		// triggers Listener callbacks at all. It costs nothing to
 		// keep, and means a literal trailing "?" token still gets a
 		// sensible answer instead of "% Invalid input" if that
-		// assumption ever changes.
-		if len(tokens) > 0 && tokens[len(tokens)-1] == "?" {
-			help := command.HelpForPath(ctx.Position.Current().Tree, tokens[:len(tokens)-1], ctx.Translator)
+		// assumption ever changes. Checked against cmdTokens, never
+		// against a filter segment, since "?" only ever means
+		// something as part of resolving a command, not as part of a
+		// "| include" pattern.
+		if len(cmdTokens) > 0 && cmdTokens[len(cmdTokens)-1] == "?" {
+			help := command.HelpForPath(ctx.Position.Current().Tree, cmdTokens[:len(cmdTokens)-1], ctx.Translator, ctx.ListOptions)
 			if help != "" {
 				fmt.Print(help)
 			}
 			continue
 		}
 
-		res := command.Resolve(ctx.Position.Current().Tree, tokens)
+		res := command.Resolve(ctx.Position.Current().Tree, cmdTokens)
 		username := ""
 		if ctx.Session != nil {
 			username = ctx.Session.Username
@@ -733,7 +784,20 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			fmt.Println("%", ctx.Translator.T("runloop.not_negatable", strings.Join(res.FullName, " ")))
 			ctx.Audit.Log(username, line, false)
 		default:
-			// Checked first, before ValidateArgs. See this function's
+			// Checked before anything else in this branch. A
+			// filter was typed, len(stages) > 0, but this command
+			// was never marked Pageable, see
+			// command.Command.Pageable's own doc comment, so there
+			// is nothing here to capture, filter, or page. This is a
+			// real error, not a silent no-op, the same "fail loudly"
+			// convention this project already applies to every other
+			// malformed request.
+			if len(stages) > 0 && !res.Command.Pageable {
+				fmt.Println("%", ctx.Translator.T("runloop.not_pageable", strings.Join(res.FullName, " ")))
+				ctx.Audit.Log(username, line, false)
+				continue
+			}
+			// Checked next, before ValidateArgs. See this function's
 			// own doc comment for why. It avoids leaking a password-
 			// gated command's argument shape requirements to a
 			// session that has not supplied the password yet. This
@@ -798,7 +862,20 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			// always reset after, so a later non-negated command in
 			// the same session never accidentally inherits it.
 			ctx.Negated = res.Negated
-			runErr := res.Command.RunFunc(ctx, res.Args)
+			var runErr error
+			if res.Command.Pageable {
+				// See dispatchPageable's own doc comment for the
+				// capture, filter, and page sequence this runs
+				// instead of calling RunFunc directly. A Pageable
+				// command is exactly the kind this is safe for, one
+				// whose entire output is produced up front with no
+				// interactive prompt of its own reading from the
+				// terminal partway through, see
+				// Command.Pageable's own doc comment.
+				runErr = dispatchPageable(ctx, res, stages, opts.TerminalFD)
+			} else {
+				runErr = res.Command.RunFunc(ctx, res.Args)
+			}
 			ctx.Negated = false
 			isLoggableNow := ctx.Audit.WouldLog()
 			if wasLoggable || isLoggableNow {
@@ -1045,7 +1122,7 @@ func sortedUserNames(users auth.Users) []string {
 // plaintext form. This can only happen if
 // var/tree/tree_structure.yaml itself was hand-edited with a raw
 // "$0$..." value in password_hash:, since "password manager
-// <secret>", cmd/cmd_password_manager.go, always calls
+// <secret>", cmd/core/cmd_password_manager.go, always calls
 // auth.HashPassword, which never produces the plaintext form. So this
 // path only catches a manifest that was authored that way directly,
 // the same testing convenience reasoning as the login side.
@@ -1055,6 +1132,61 @@ func warnPlaintextLevelSecrets(logger *log.Logger, levels *command.TreeStructure
 			logger.Warnln("WARN: Command Level", level.Name, "has a plaintext (non-hashed) password_hash set - this must never be used in a real deployment")
 		}
 	}
+}
+
+// dispatchPageable - This function runs a Pageable command's own
+// RunFunc through paging.CaptureOutput, then paging.ApplyFilters, then
+// paging.Display, in that order, in place of calling RunFunc directly
+// the way runLoop's default branch does for every other command. See
+// Command.Pageable's own doc comment for which commands this is safe
+// for at all.
+//
+// A failure inside paging.CaptureOutput itself, essentially
+// impossible in practice, is returned directly, since nothing was
+// captured at all and there is nothing left to filter or page. A
+// failure inside paging.ApplyFilters, an invalid regular expression
+// typed as a filter pattern for instance, only possible when
+// ctx.FilterMode is FilterModeRegex, is printed directly here rather
+// than returned, since it describes the filter itself, not the
+// command that produced the output being filtered; RunFunc's own
+// runErr is still returned afterward either way, so a command that
+// both printed something and returned an error still reports that
+// error through this function's caller exactly as it would have
+// running unpaged.
+func dispatchPageable(ctx *command.AppContext, res command.ResolveResult, stages []paging.FilterStage, fd int) error {
+	var runErr error
+	lines, cerr := paging.CaptureOutput(func() { runErr = res.Command.RunFunc(ctx, res.Args) })
+	if cerr != nil {
+		return cerr
+	}
+
+	filtered, ferr := paging.ApplyFilters(lines, stages, ctx.FilterMode)
+	if ferr != nil {
+		fmt.Printf("%% %v\n", ferr)
+		return runErr
+	}
+
+	pageLines := paging.EffectivePageLines(fd, ctx.PageLines, ctx.DefaultPageLines)
+	if derr := paging.Display(os.Stdout, fd, ctx.Translator, filtered, pageLines, ctx.PagingEnabled); derr != nil {
+		fmt.Printf("%% %v\n", derr)
+	}
+	return runErr
+}
+
+// filterModeFromConfig - This function converts
+// config.SystemConfig.FilterMatchMode's plain YAML string into
+// package paging's own typed FilterMode, the one place this project
+// crosses that boundary, so package config never needs to import
+// package paging just to describe its own default. config.LoadSystemConfig's
+// own validate already rejects any value other than "substring" or
+// "regex" before this ever runs, so the switch below has no error
+// path of its own; an unrecognized value cannot reach here from a
+// real, loaded configuration.
+func filterModeFromConfig(mode string) paging.FilterMode {
+	if mode == "regex" {
+		return paging.FilterModeRegex
+	}
+	return paging.FilterModeSubstring
 }
 
 // firstBadToken - This function returns the first entry of a

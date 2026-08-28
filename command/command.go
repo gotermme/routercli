@@ -80,14 +80,25 @@ func (c *Command) ResolvedArgHelp(t *i18n.Translator) string {
 // way ordinary tree commands are, since real Cisco does not abbreviate
 // it either. It is a two-letter reserved word, not a real subtree to
 // fuzzy match against.
-func Resolve(tree map[string]*Command, tokens []string) ResolveResult {
+//
+// Every return point funnels through the deferred call below, which
+// sets RunnableAsIs from whatever result.Command and result.Args
+// actually ended up being, so every caller sees the same "<cr>" signal
+// regardless of which of Resolve()'s several return points was
+// actually taken. See runnableAsIs's own doc comment for exactly what
+// it checks.
+func Resolve(tree map[string]*Command, tokens []string) (result ResolveResult) {
+	defer func() {
+		result.RunnableAsIs = runnableAsIs(result.Command, result.Args)
+	}()
+
 	if len(tokens) > 0 && tokens[0] == "no" {
-		result := Resolve(tree, tokens[1:])
-		result.Negated = true
+		inner := Resolve(tree, tokens[1:])
+		inner.Negated = true
+		result = inner
 		return result
 	}
 
-	var result ResolveResult
 	current := tree
 	var directives *Command
 
@@ -107,6 +118,34 @@ func Resolve(tree map[string]*Command, tokens []string) ResolveResult {
 
 			switch len(candidates) {
 			case 1:
+				// Nothing typed yet for this position, but directives,
+				// the command matched so far, is already valid to run
+				// on its own, for example "totp enable" is a complete
+				// command even though "totp enable qr" also exists
+				// below it. Auto-descending into the sole remaining
+				// subcommand here, "qr", would silently hide that
+				// "enable" itself is already a complete command,
+				// which real Cisco and HP never do; both show "qr"
+				// alongside "<cr>" instead. This surfaces that the
+				// same way genuine ambiguity is surfaced, through the
+				// empty-token branch every caller already special-
+				// cases, see completer.ambiguousTokenIsEmpty and this
+				// function's own callers in package completer and
+				// HelpForPath.
+				//
+				// This never fires for a genuinely partial word, only
+				// for tok == "", since abbreviating "sh" to "show" when
+				// "show" is the only match is exactly the completion
+				// behavior real Cisco and HP already do, and this
+				// project's own established convention, not something
+				// this changes.
+				if tok == "" && runnableAsIs(directives, nil) {
+					result.Ambiguous = candidates
+					result.AmbiguousTree = current
+					result.AmbigAt = i
+					result.Command = directives
+					return result
+				}
 				tok = candidates[0]
 				cmd = current[tok]
 			case 0:
@@ -117,6 +156,7 @@ func Resolve(tree map[string]*Command, tokens []string) ResolveResult {
 			default:
 				// Ambiguous: more than one command could match this token.
 				result.Ambiguous = candidates
+				result.AmbiguousTree = current
 				result.AmbigAt = i
 				result.Command = directives
 				return result
@@ -186,6 +226,48 @@ func ValidateArgs(cmd *Command, args []string) error {
 // ----------------------------------------------------------------------
 // Private Functions - Command
 // ----------------------------------------------------------------------
+
+// runnableAsIs - This function reports whether cmd is both set and
+// directly executable right now with args as its arguments, matching
+// real Cisco and HP's own "<cr>" notation for "you can press enter
+// here". cmd must have a RunFunc of its own, a pure container command
+// with only Subcommands and no "run:" of its own is never runnable as
+// is, and args, once a single trailing empty string is stripped, must
+// satisfy both cmd.MinArgs and cmd.MaxArgs.
+//
+// The trailing empty string strip matters because both of this
+// project's own "<cr>" callers, completer.OnChange and HelpForPath's
+// caller in completer.handleHelp, follow the same convention every
+// other empty-token check in this project already follows, appending
+// a synthetic "" token to mean nothing typed yet for this position,
+// see ambiguousTokenIsEmpty's own doc comment in package completer for
+// the fuller reasoning. That placeholder is never a real argument, so
+// counting it as one would report a command such as plain "exit" as
+// not runnable the moment a trailing space is typed after it, purely
+// because Resolve() had nowhere else to put that placeholder token
+// once "exit" itself, having no Subcommands, stopped command matching
+// and folded every remaining token into Args. A real argument is
+// never itself the empty string, tokenize.Tokenize and strings.Fields
+// alike never produce one, so stripping at most one trailing empty
+// string here is always safe.
+func runnableAsIs(cmd *Command, args []string) bool {
+	if cmd == nil || cmd.RunFunc == nil {
+		return false
+	}
+
+	effective := args
+	if n := len(effective); n > 0 && effective[n-1] == "" {
+		effective = effective[:n-1]
+	}
+
+	if cmd.MinArgs != nil && len(effective) < *cmd.MinArgs {
+		return false
+	}
+	if cmd.MaxArgs != nil && len(effective) > *cmd.MaxArgs {
+		return false
+	}
+	return true
+}
 
 // intPtr - This function returns a pointer to the int passed in. It
 // exists so a test can write MinArgs: intPtr(1) inline instead of

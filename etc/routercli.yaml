@@ -4,17 +4,15 @@
 TreeStructure: var/tree/tree_structure.yaml
 
 
-# --- System Logging, History, and Audit Logs ---
-# Valid options for system logs are: 0, 1, 3, 5
-LogLevel: 0
-# LogFile: var/log/system.log   # empty (the default) means stderr
-AuditLogEnabled: false
+# --- System, History, and Audit Logs ---
+LogLevel: 1
+LogFile: var/log/system.log
 HistoryFile: var/log/history.log
+AuditLogEnabled: true
 AuditLogFile: var/log/audit.log
 
 
 # --- Prevent Escape ---
-# Try to prevent a user from being able to escape to a shell. Off by default.
 PreventEscape: false
 
 
@@ -35,7 +33,7 @@ LanguageDir: var/lang
 # ElevationTimeout: 5m
 
 
-# --- Multi-user authentication ---
+# --- Authentication ---
 # AuthRequired turns on the login prompt at startup. Off by default so
 # the example works with zero setup. UsersFile is only read when
 # AuthRequired is true.
@@ -127,3 +125,61 @@ PasswordMinLength: 10
 # that failed to match its own confirmation or the policy above,
 # before giving up on that attempt.
 PasswordChangeMaxAttempts: 3
+
+
+# --- Command listing order, "help", "?", and Tab completion ---
+# AlphabeticalCommandOrder sorts every listing of more than one
+# command name by name, matching real Cisco and HP devices. Turn this
+# off to show commands in the order their own tree file defines them
+# in instead. MergeCommonCommands below MUST be false whenever this is
+# false.
+AlphabeticalCommandOrder: true
+#
+# MergeCommonCommands sorts a common command, help, "?", exit, end,
+# merged into every Command Level from var/tree/level_common.yaml,
+# into its normal alphabetical position among every other command,
+# again matching real Cisco and HP. Turn this off to append every
+# common command after everything else instead, alphabetical among
+# themselves. Setting this true while AlphabeticalCommandOrder above
+# is false is a hard error at startup, since there is then no single
+# combined alphabetical order left to merge common commands into.
+MergeCommonCommands: true
+
+
+# --- Output paging and pipe filtering ---
+# PagingEnabled is the deployment wide switch for the interactive
+# "--More--" pager. It only ever applies to a command whose own tree
+# entry sets "pageable: true", see var/tree/README.md. Turning this off
+# does not disable "| include", "| exclude", or "| begin" filtering
+# itself, only the pause; a Pageable command's output is still filtered,
+# just written straight through afterward with no pause at all.
+PagingEnabled: true
+#
+# DefaultPageLines is how many lines a session shows before pausing,
+# used only when the real terminal's own height cannot be detected, a
+# non-interactive session for instance, and no "terminal length" has
+# been typed yet this session. When the terminal's height can be
+# detected, that real height is used instead, see
+# paging.EffectivePageLines.
+DefaultPageLines: 24
+#
+# FilterMatchMode chooses how "| include", "| exclude", and "| begin"
+# match their pattern against each line of output. "substring" is a
+# plain, literal text search, predictable for an operator who never
+# wants to think about regular expression metacharacters, a period in
+# an IP address for instance. "regex" compiles the pattern as a real
+# Go RE2 regular expression, matching exactly what a real Cisco or HP
+# device does. Either value can be switched at runtime, for the current
+# session only, with "terminal filter-mode <substring|regex>".
+FilterMatchMode: substring
+#
+# MaxFilterChainDepth limits how many "| ..." filters may be chained
+# together on one command line, "show running-config | include eth0 |
+# exclude shutdown" being a chain of two. This exists as a security
+# limit, not just a convenience one: an unbounded chain lets a session
+# ask this deployment to do an unbounded amount of filtering work from
+# one typed line. Zero disables filtering entirely; a command line with
+# any "| ..." at all is then refused with an error. A chain deeper than
+# this value is also refused with an error, never silently truncated or
+# run anyway.
+MaxFilterChainDepth: 2

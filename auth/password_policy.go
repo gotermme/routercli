@@ -29,7 +29,7 @@ const MaxPasswordLength = 72
 // and the fixed MaxPasswordLength above, returning every rule it
 // fails to satisfy, nil if it satisfies all of them. Every rule is
 // checked and reported together, rather than stopping at the first
-// failure, so a caller such as cmd/cmd_password.go can tell someone
+// failure, so a caller such as cmd/core/cmd_password.go can tell someone
 // everything wrong with a rejected password at once instead of
 // walking them through one violation per attempt.
 //

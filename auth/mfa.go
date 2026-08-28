@@ -61,7 +61,7 @@ func VerifySecondFactor(w io.Writer, reader *bufio.Reader, fd int, u *User, t *i
 // already read from wherever the caller got it, a masked terminal
 // prompt, a test fixture, or otherwise. It performs no I/O of its
 // own, the pure counterpart to VerifySecondFactor above, for a caller
-// such as cmd/cmd_password.go's password change command that already
+// such as cmd/core/cmd_password.go's password change command that already
 // runs its own retry loop around a masked prompt and only needs to
 // check an already-read code, not have this function prompt for one
 // itself. now is threaded through as a parameter rather than read
@@ -84,8 +84,8 @@ func VerifySecondFactorCode(u *User, code string, now time.Time) bool {
 // standalone counterpart to promptAndVerifyTOTP below, used by
 // anything that already knows which secret to check a code against
 // outside the login flow, such as the totp enable and totp disable
-// commands in package cmd, rather than deriving that secret from a
-// matched login attempt the way PromptLogin does. Unlike
+// commands in package core (cmd/core), rather than deriving that
+// secret from a matched login attempt the way PromptLogin does. Unlike
 // promptAndVerifyTOTP, this has no bufio.Reader fallback for a
 // non-terminal fd, since every real caller of this function already
 // runs inside main.go's interactive runLoop with a genuine terminal

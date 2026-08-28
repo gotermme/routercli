@@ -43,7 +43,7 @@ This property defines the Command Level a session must currently be in in order
 to reach this Command Level. It is set on every entry except the base level,
 which MUST omit it, since the base level is where every session starts and
 there can be only one base level in the Tree Structure. Every Command Level,
-without exception, is reached through a handwritten `cmd/cmd_*.go` file that
+without exception, is reached through a handwritten `cmd_*.go` file that
 enforces this parent requirement.
 
 #### `inherit_parent`
@@ -99,7 +99,8 @@ Each YAML file contains the commands found for that Command Level. It does not
 define what a command actually does, as that lives in the actual Go code. The
 command name found in the `run` property below must exactly match the name
 found in the `command.Register()` function that is part of the `init
-()` function found in `cmd/cmd_<something>.go`. This is how the information in
+()` function found in a `cmd_<something>.go` file in `cmd/core` or
+`cmd/product`. This is how the information in
 the YAML file and the Go code are connected. If the names do not match, then
 the system refuses to start.
 
@@ -145,7 +146,8 @@ This property works the same way as `desc_key`, but for `arghelp` instead of
 
 This property is the name of the handler to call when this command runs. It must
 exactly match the string passed to `command.Register()` in some
-`cmd/cmd_<something>.go` file's `init()` function, or RouterCLI refuses to
+`cmd_<something>.go` file's `init()` function, in `cmd/core` or
+`cmd/product`, or RouterCLI refuses to
 start.
 
 #### `alias`
@@ -213,6 +215,28 @@ The flag names checked today are `totp`, tied to `EnableTOTPAuthentication`,
 and `password_change`, tied to `EnableCLIAuthentication`. See
 `var/tree/level_user.yaml` for both in real use, and `etc/README.md` for
 what each of those `routercli.yaml` settings does.
+
+#### `pageable`
+
+This property, a boolean defaulting to `false`, marks a command as safe to
+run through output paging and pipe filtering, `| include`, `| exclude`,
+`| begin`, and the interactive `--More--` pager for output longer than one
+screen. It is opt in on purpose, one command at a time, rather than on for
+every command with an exclusion list. A command whose own handler reads
+directly from the terminal partway through running, a masked password
+prompt or a TOTP code for instance, must never be marked `pageable`, since a
+pageable command's entire output is captured into memory before anything
+reaches the real terminal, see the `paging` package's own `CaptureOutput`
+function, and an interactive prompt captured that way would never actually
+reach the person who needs to answer it. Every command in
+`var/tree/level_base.yaml` that only prints and returns, `show version`,
+`show interface`, `show running-config`, `show startup-config`, and `show
+terminal` among them, sets `pageable: true`. A command line that types a
+pipe filter against a command left at the default `false` is refused with
+an error rather than silently ignoring the filter and running the command
+anyway. See `README.md`'s own section on output paging and filtering for
+the full picture, and `etc/README.md` for the related `PagingEnabled`,
+`DefaultPageLines`, `FilterMatchMode`, and `MaxFilterChainDepth` settings.
 
 #### `subcommands`
 

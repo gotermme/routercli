@@ -138,6 +138,12 @@ func DefaultSystemConfig() SystemConfig {
 		EnableTOTPAuthentication:    true,
 		AuthProviders:               []AuthProviderConfig{{Name: "local", Type: "local"}},
 		CLIAuthProvider:             "local",
+		AlphabeticalCommandOrder:    true,
+		MergeCommonCommands:         true,
+		PagingEnabled:               true,
+		DefaultPageLines:            24,
+		FilterMatchMode:             "substring",
+		MaxFilterChainDepth:         2,
 	}
 }
 
@@ -223,6 +229,35 @@ func (c SystemConfig) validate() error {
 
 	if c.PasswordChangeMaxAttempts < 1 {
 		return fmt.Errorf("PasswordChangeMaxAttempts must be a positive integer, got %d", c.PasswordChangeMaxAttempts)
+	}
+
+	// MergeCommonCommands true means "merge every common command into
+	// its normal alphabetical position", which only means something
+	// once AlphabeticalCommandOrder has actually put every command
+	// into one true alphabetical order to merge into. With
+	// AlphabeticalCommandOrder false there is no single combined
+	// definition order across a level's own tree file and
+	// CommonTreeFile the way there is one true alphabetical order
+	// across both, see command.SortCommandNames's own doc comment, so
+	// this combination is rejected here rather than silently falling
+	// back to appended order the way an earlier phase of this project
+	// once let it.
+	if !c.AlphabeticalCommandOrder && c.MergeCommonCommands {
+		return fmt.Errorf("MergeCommonCommands cannot be true while AlphabeticalCommandOrder is false, there is no single combined definition order to merge common commands into")
+	}
+
+	if c.DefaultPageLines < 1 {
+		return fmt.Errorf("DefaultPageLines must be a positive integer, got %d", c.DefaultPageLines)
+	}
+
+	switch c.FilterMatchMode {
+	case "substring", "regex":
+	default:
+		return fmt.Errorf("FilterMatchMode must be 'substring' or 'regex', got %q", c.FilterMatchMode)
+	}
+
+	if c.MaxFilterChainDepth < 0 {
+		return fmt.Errorf("MaxFilterChainDepth must be zero or positive, got %d", c.MaxFilterChainDepth)
 	}
 
 	if c.SessionIdleTimeout < 0 {

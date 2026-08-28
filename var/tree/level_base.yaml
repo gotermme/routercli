@@ -2,22 +2,6 @@
 # CLI environment
 
 commands:
-  show:
-    desc_key: show.desc
-    subcommands:
-      interface:
-        desc_key: show.interface.desc
-        run: show.interface
-      running-config:
-        desc_key: show.running_config.desc
-        run: show.running-config
-      startup-config:
-        desc_key: show.startup_config.desc
-        run: show.startup-config
-      version:
-        desc_key: show.version.desc
-        run: show.version
-
   enable:
     desc_key: enable.desc
     run: enable

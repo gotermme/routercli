@@ -76,7 +76,7 @@ func VerifyLogin(provider AuthProvider, username, password string) (*Session, bo
 // user whose users.yaml entry has a TOTPSecret set, since that global
 // switch is meant to turn step-up authentication off deployment wide,
 // not merely to stop new second factors from being enrolled. See
-// cmd/cmd_totp.go, which is removed from the tree entirely, through
+// cmd/core/cmd_totp.go, which is removed from the tree entirely, through
 // command's Requires field, when this same configuration flag is
 // off.
 //
@@ -210,7 +210,7 @@ func PromptSecret(w io.Writer, fd int, t *i18n.Translator) (string, error) {
 
 // PromptNewPassword - This function reads a candidate new password,
 // masked the same way PromptSecret reads an existing one, for
-// cmd/cmd_password.go's password change command. It is a distinct
+// cmd/core/cmd_password.go's password change command. It is a distinct
 // function from PromptSecret, rather than PromptSecret reused as is,
 // so its own prompt text ("New password: ") reads unambiguously
 // different from a prompt for an already-known password.
@@ -225,7 +225,7 @@ func PromptNewPassword(w io.Writer, fd int, t *i18n.Translator) (string, error) 
 }
 
 // PromptPasswordConfirmation - This function reads a second, masked
-// copy of a candidate new password, for cmd/cmd_password.go's
+// copy of a candidate new password, for cmd/core/cmd_password.go's
 // password change command to confirm against what PromptNewPassword
 // already read, the same "type it twice" confirmation step any
 // password change form uses to catch a typo before it becomes the

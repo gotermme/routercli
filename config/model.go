@@ -115,6 +115,80 @@ type SystemConfig struct {
 	// password against. It is ignored entirely when
 	// EnableCLIAuthentication is false.
 	CLIAuthProvider string `yaml:"CLIAuthProvider"`
+
+	// AlphabeticalCommandOrder, true by default, sorts a listing of
+	// more than one command name, "help", "?", and Tab completion's own
+	// candidate list, by name. Setting this false instead shows
+	// commands in the order their own tree file defines them in, own
+	// commands before common commands regardless of MergeCommonCommands
+	// below, since there is no one true combined definition order
+	// across two separate files the way there is one true alphabetical
+	// order across both. Real Cisco and HP devices both sort
+	// alphabetically, which is why this defaults to true. MUST be true
+	// whenever MergeCommonCommands is true, see that field's own doc
+	// comment for the startup error the opposite combination produces.
+	// See command.ListOptions and command.SortCommandNames for where
+	// this is actually applied.
+	AlphabeticalCommandOrder bool `yaml:"AlphabeticalCommandOrder"`
+
+	// MergeCommonCommands, true by default, sorts a common command,
+	// help, "?", exit, end, merged into every Command Level's Tree
+	// from var/tree/level_common.yaml unless a level sets skip_common,
+	// into its normal alphabetical position among every other command
+	// in a listing, matching real Cisco and HP, which do the same.
+	// Setting this false instead appends every common command after
+	// every other command, alphabetical among themselves. This
+	// property MUST NOT be true while AlphabeticalCommandOrder above
+	// is false; validate rejects that combination as a hard error at
+	// startup, since there is no single combined definition order
+	// across two separate files the way there is one true alphabetical
+	// order across both, so there is nothing coherent left for this
+	// setting to merge into.
+	MergeCommonCommands bool `yaml:"MergeCommonCommands"`
+
+	// PagingEnabled, true by default, is the deployment wide switch
+	// for the interactive "--More--" pause a Pageable command's
+	// output goes through once it is longer than one screen, see
+	// command.Command.Pageable and package paging. Setting this false
+	// never blocks a session on a keypress, printing every line
+	// straight through instead, while "| include", "| exclude", and
+	// "| begin" filtering, an entirely separate concern, stays
+	// available regardless of this setting. Real Cisco and HP always
+	// pause by default, which is why this defaults to true.
+	PagingEnabled bool `yaml:"PagingEnabled"`
+
+	// DefaultPageLines, 24 by default, matching the classic terminal
+	// height most devices have always defaulted to, is how many
+	// lines a Pageable command's output shows before pausing when no
+	// session has ever typed "terminal length" and the real
+	// terminal's own height cannot be read, piped or redirected
+	// stdin for instance. A session sitting at a real terminal, and
+	// one that has typed "terminal length" explicitly, both use a
+	// different value instead, see paging.EffectivePageLines.
+	DefaultPageLines int `yaml:"DefaultPageLines"`
+
+	// FilterMatchMode, "substring" by default, chooses how a
+	// "| include", "| exclude", or "| begin" pattern is matched
+	// against a line of output at startup. "substring" keeps a line
+	// whenever it literally contains the typed text, predictable for
+	// an operator who never wants to think about a metacharacter
+	// hiding inside an ordinary word. "regex" compiles the pattern as
+	// a Go RE2 regular expression instead, matching real Cisco and
+	// HP exactly. validate rejects any other value. A session can
+	// change this at runtime with "terminal filter-mode
+	// <substring|regex>", see command.AppContext.FilterMode.
+	FilterMatchMode string `yaml:"FilterMatchMode"`
+
+	// MaxFilterChainDepth, 2 by default, is the most "| ..." stages
+	// one typed command line may chain together, "show running-config
+	// | include interface | exclude shutdown" being a chain of two.
+	// A line asking for more than this is refused outright with a
+	// real error naming the configured maximum, never silently
+	// truncated to it. Zero disables output filtering entirely for
+	// this deployment, a real hardening option for a project that
+	// wants Pageable output but no pipe filtering exposed at the
+	// command line at all. validate rejects a negative value.
+	MaxFilterChainDepth int `yaml:"MaxFilterChainDepth"`
 }
 
 // AuthProviderConfig - This type is one entry in SystemConfig's own
