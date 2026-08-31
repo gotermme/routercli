@@ -61,3 +61,86 @@ func VerifyCommandLevels(levels *TreeStructure) []error {
 
 	return problems
 }
+
+// VerifyVendorDefinedSecrets - This function checks a successfully
+// loaded TreeStructure against the three rules var/tree/README.md
+// documents for VendorDefinedPasswordHash, on both a CommandLevel and
+// a Command, the same "run this once at startup, fail loudly, catch
+// every problem in one pass" convention VerifyCommandLevels above
+// already follows, and it is called from the same places, right after
+// LoadTreeStructure at ordinary startup, and standalone under
+// --check-config.
+//
+// A VendorDefinedPasswordHash exists to hold an implementer's own
+// baked-in secret, deliberately kept out of an ordinary end user's
+// reach, see that field's own doc comment in model.go for the full
+// reasoning. These three rules are what keep that promise honest
+// rather than aspirational:
+//
+//  1. PasswordHash and VendorDefinedPasswordHash MUST NOT both be set
+//     on the same level or command. Nothing in this project ever
+//     checks both at once, see EffectivePasswordHash, so allowing
+//     both to be set would silently make PasswordHash dead
+//     configuration, exactly the kind of mistake that stays invisible
+//     until someone wonders why a password they set no longer works.
+//  2. PasswordUserSettable MUST NOT be explicitly true alongside a
+//     VendorDefinedPasswordHash. UserSettablePassword already
+//     resolves this correctly at runtime regardless, VendorDefined
+//     always wins, but a manifest that writes password_user_settable:
+//     true right next to a vendor secret almost certainly reflects a
+//     misunderstanding worth catching at startup rather than trusting
+//     the resolution to quietly paper over it forever.
+//  3. Hidden MUST be true alongside a VendorDefinedPasswordHash. A
+//     vendor defined secret that is still openly listed in help output
+//     and tab completion defeats the entire point of keeping it out of
+//     an ordinary end user's reach.
+func VerifyVendorDefinedSecrets(levels *TreeStructure) []error {
+	var problems []error
+
+	for _, level := range levels.Order {
+		if level.VendorDefinedPasswordHash == "" {
+			continue
+		}
+		if level.PasswordHash != "" {
+			problems = append(problems, fmt.Errorf("command level %q sets both password_hash and vendor_defined_password_hash - remove one, they must never both be set on the same level", level.Name))
+		}
+		if level.PasswordUserSettable != nil && *level.PasswordUserSettable {
+			problems = append(problems, fmt.Errorf("command level %q sets vendor_defined_password_hash and password_user_settable: true together - a vendor defined password must never be user settable", level.Name))
+		}
+		if !level.Hidden {
+			problems = append(problems, fmt.Errorf("command level %q sets vendor_defined_password_hash but not hidden: true - a vendor defined password must always be hidden", level.Name))
+		}
+	}
+
+	visited := make(map[*Command]bool)
+	var walk func(path string, tree map[string]*Command)
+	walk = func(path string, tree map[string]*Command) {
+		for name, cmd := range tree {
+			if visited[cmd] {
+				continue
+			}
+			visited[cmd] = true
+			full := name
+			if path != "" {
+				full = path + " " + name
+			}
+			if cmd.VendorDefinedPasswordHash != "" {
+				if cmd.PasswordHash != "" {
+					problems = append(problems, fmt.Errorf("command %q sets both password_hash and vendor_defined_password_hash - remove one, they must never both be set on the same command", full))
+				}
+				if cmd.PasswordUserSettable != nil && *cmd.PasswordUserSettable {
+					problems = append(problems, fmt.Errorf("command %q sets vendor_defined_password_hash and password_user_settable: true together - a vendor defined password must never be user settable", full))
+				}
+				if !cmd.Hidden {
+					problems = append(problems, fmt.Errorf("command %q sets vendor_defined_password_hash but not hidden: true - a vendor defined password must always be hidden", full))
+				}
+			}
+			walk(full, cmd.Subcommands)
+		}
+	}
+	for _, level := range levels.Order {
+		walk("", level.Tree)
+	}
+
+	return problems
+}

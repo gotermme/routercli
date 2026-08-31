@@ -64,10 +64,11 @@ const (
 // GenerateTOTPSecret - This function generates a new random TOTP
 // secret, base32-encoded with no padding, the way every authenticator
 // app expects it typed or scanned. It is called once per user during
-// enrollment, see the --mfa flag in main.go. The result is what gets
-// shown as both the QR code and the plain text manual entry string,
-// and what an administrator pastes into that user's users.yaml entry
-// as totp_secret.
+// enrollment, see the totp enable and totp enable qr commands in
+// package core (cmd/core). The result is what gets shown as both the
+// QR code and the plain text manual entry string, and what
+// SaveUsers persists into that user's users.yaml entry as
+// totp_secret.
 func GenerateTOTPSecret() (string, error) {
 	raw := make([]byte, totpSecretBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -78,11 +79,11 @@ func GenerateTOTPSecret() (string, error) {
 
 // GenerateTOTPCode - This function computes the current six-digit
 // code for a base32-encoded secret at time t. It is exposed mainly
-// for the --mfa enrollment flow, which shows the administrator what
-// code their app should be displaying right now, as a sanity check
-// before they commit to typing one in. Most callers verifying a login
-// attempt want VerifyTOTPCode instead, which also tolerates clock
-// drift.
+// for tests that need a live code to confirm a freshly generated
+// secret with, the same sanity check totp enable's own interactive
+// confirmation step performs against whatever the user actually
+// types. Most callers verifying a login attempt want VerifyTOTPCode
+// instead, which also tolerates clock drift.
 func GenerateTOTPCode(base32Secret string, t time.Time) (string, error) {
 	secret, err := decodeTOTPSecret(base32Secret)
 	if err != nil {
@@ -143,10 +144,9 @@ func TOTPProvisioningURI(issuer, username, base32Secret string) string {
 // readability when typing it manually. VerifyTOTPCode and
 // decodeTOTPSecret already strip spaces before decoding, so this
 // grouping is display only and never affects what actually gets
-// validated or stored. This is shared by both the standalone
-// enrollment utility, main.go's --mfa flag, and the totp enable
-// command in package core (cmd/core), so the two present a freshly
-// generated secret exactly the same way.
+// validated or stored. This is shared by both totp enable and totp
+// enable qr, the two enrollment commands in package core (cmd/core),
+// so both present a freshly generated secret exactly the same way.
 func FormatTOTPSecretForDisplay(secret string) string {
 	var b strings.Builder
 	for i, r := range secret {

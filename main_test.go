@@ -7,7 +7,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"os/user"
@@ -102,6 +101,28 @@ func TestAttachPasswordRateLimitersOnlySetsLimiterForPasswordProtectedCommands(t
 	protected.PasswordRateLimiter.RecordFailure() // maxAttempts is 1, so this locks it out
 	if ok, _ := protected.PasswordRateLimiter.Allow(); ok {
 		t.Error("expected the attached RateLimiter to actually enforce maxAttempts=1, not just exist")
+	}
+}
+
+// TestAttachPasswordRateLimitersCoversVendorDefinedPasswordHashToo -
+// This test verifies that a command whose only secret is a
+// VendorDefinedPasswordHash, no ordinary PasswordHash at all, still
+// gets a real RateLimiter attached, the same as an ordinary
+// password-protected command does. Without EffectivePasswordHash
+// being what this function actually checks, a vendor defined command
+// would go completely unprotected against repeated guesses.
+func TestAttachPasswordRateLimitersCoversVendorDefinedPasswordHashToo(t *testing.T) {
+	vendorProtected := &command.Command{VendorDefinedPasswordHash: "$6$$vendorhash"}
+	levels := &command.TreeStructure{
+		Order: []*command.CommandLevel{
+			{Name: "exec", Tree: map[string]*command.Command{"vendor-thing": vendorProtected}},
+		},
+	}
+
+	attachPasswordRateLimiters(levels, 1, time.Minute, 5*time.Minute)
+
+	if vendorProtected.PasswordRateLimiter == nil {
+		t.Fatal("expected a command gated only by VendorDefinedPasswordHash to still get a PasswordRateLimiter")
 	}
 }
 
@@ -332,6 +353,116 @@ func TestMkdirForFileCreatesMissingParentDirectory(t *testing.T) {
 func TestMkdirForFileNoOpForBarePathWithNoDirectory(t *testing.T) {
 	if err := mkdirForFile("audit.log"); err != nil {
 		t.Errorf("mkdirForFile(\"audit.log\") returned unexpected error: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// loadStartupConfig
+//
+// ----------------------------------------------------------------------
+
+// writeMainTestTree - This function resolves yamlBody into a real
+// map[string]*command.Command by writing it to a throwaway tree file
+// and loading it through command.LoadTree, the same loader main.go
+// itself uses at startup, mirroring cmd/product's own loadTestTree.
+func writeMainTestTree(t *testing.T, yamlBody string) map[string]*command.Command {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tree.yaml")
+	if err := os.WriteFile(path, []byte(yamlBody), 0644); err != nil {
+		t.Fatalf("failed to write test tree file: %v", err)
+	}
+	tree, err := command.LoadTree(path)
+	if err != nil {
+		t.Fatalf("LoadTree returned error: %v", err)
+	}
+	return tree
+}
+
+// startupConfigLevelsForLoad - This function builds a real, working
+// two level Command Level Tree, base and exec, loaded through
+// command.LoadTree the same way LoadTreeStructure itself does, rather
+// than the bare, Tree-less levels baseExecLevelsForPrompt above builds
+// for buildPrompt's own narrower needs. base's own tree carries a real
+// "enable" command, resolved through cmd/core's own registered
+// handler, this file's own blank import of that package, and exec's
+// own tree carries a real "hostname" command, resolved through
+// cmd/product's, so TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition
+// below actually exercises loadStartupConfig, and the
+// command.ReplayLines call inside it, the same way main() itself does,
+// not a stand-in for either one.
+func startupConfigLevelsForLoad(t *testing.T) *command.TreeStructure {
+	t.Helper()
+	baseTree := writeMainTestTree(t, "commands:\n  enable:\n    run: enable\n")
+	execTree := writeMainTestTree(t, "commands:\n  hostname:\n    minargs: 1\n    maxargs: 1\n    run: hostname\n")
+	base := &command.CommandLevel{Name: "base", IsBase: true, Tree: baseTree}
+	exec := &command.CommandLevel{Name: "exec", Parent: "base", EnterCommand: "enable", Tree: execTree}
+	return &command.TreeStructure{
+		Order:  []*command.CommandLevel{base, exec},
+		ByName: map[string]*command.CommandLevel{"base": base, "exec": exec},
+	}
+}
+
+// TestLoadStartupConfigMissingFileIsNotAnError - This test verifies
+// that loadStartupConfig treats a path that does not exist yet, the
+// state of a brand new deployment that has never run "copy
+// running-config startup-config", as a no-op, not an error, and never
+// even touches ctx.Levels or ctx.Position along the way, since the
+// function returns before ever reaching either one.
+func TestLoadStartupConfigMissingFileIsNotAnError(t *testing.T) {
+	ctx := &command.AppContext{
+		State:  &product.ProductState{},
+		Logger: log.New(io.Discard, "", 0),
+	}
+	path := filepath.Join(t.TempDir(), "never-saved-startup-config")
+
+	if err := loadStartupConfig(ctx, path); err != nil {
+		t.Errorf("loadStartupConfig returned unexpected error for a nonexistent file: %v", err)
+	}
+}
+
+// TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition -
+// This test is the actual proof the whole feature works end to end
+// through main.go's own function, not only through command.ReplayLines
+// directly, cmd/product's own
+// TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable. It
+// writes a real saved startup-config file, "enable" followed by a
+// "hostname" line, calls loadStartupConfig against a fresh ctx sitting
+// at base, and confirms the hostname was actually applied to
+// ctx.State, that ctx.ReplayingStartupConfig is false again once it
+// returns, matching the trust window's own narrow, boot only scope,
+// and that ctx.Position and ctx.Session.CommandLevel both land back at
+// base, not left wherever replaying "enable" moved them.
+func TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition(t *testing.T) {
+	levels := startupConfigLevelsForLoad(t)
+	ctx := &command.AppContext{
+		State:    &product.ProductState{},
+		Session:  &auth.Session{CommandLevel: "base"},
+		Levels:   levels,
+		Logger:   log.New(io.Discard, "", 0),
+		Position: command.NewCommandLevelStack("base", "", levels.ByName["base"].Tree),
+	}
+	path := filepath.Join(t.TempDir(), "startup-config")
+	if err := os.WriteFile(path, []byte("enable\nhostname myrouter\n"), 0640); err != nil {
+		t.Fatalf("failed to seed startup-config file: %v", err)
+	}
+
+	if err := loadStartupConfig(ctx, path); err != nil {
+		t.Fatalf("loadStartupConfig returned unexpected error: %v", err)
+	}
+
+	state := ctx.State.(*product.ProductState)
+	if state.Hostname != "myrouter" {
+		t.Errorf("replayed Hostname = %q, want %q", state.Hostname, "myrouter")
+	}
+	if ctx.ReplayingStartupConfig {
+		t.Error("expected ReplayingStartupConfig to be false again once loadStartupConfig returns")
+	}
+	if ctx.Position.Current().Name != "base" {
+		t.Errorf("expected ctx.Position to be reset back to base, got %q", ctx.Position.Current().Name)
+	}
+	if ctx.Session.CommandLevel != "base" {
+		t.Errorf("expected ctx.Session.CommandLevel to be reset back to base, got %q", ctx.Session.CommandLevel)
 	}
 }
 
@@ -641,155 +772,5 @@ func TestLogSessionEndUsesEmptyUsernameWhenSessionNil(t *testing.T) {
 
 	if !audit.hasEntry("SESSION END") {
 		t.Errorf("expected a \"SESSION END\" entry even with a nil Session, got %v", audit.entries)
-	}
-}
-
-// ----------------------------------------------------------------------
-//
-// runTOTPSetupUtility
-//
-// ----------------------------------------------------------------------
-
-// TestRunTOTPSetupUtilitySuccess - This test verifies the success
-// path of runTOTPSetupUtility, the --mfa flag's own implementation.
-// runTOTPSetupUtility generates its own fresh secret internally and
-// prints it before ever reading the confirmation code, so this test
-// runs the call on its own goroutine, reading its streamed stdout
-// itself, on this same goroutine, rather than through a second reader
-// racing it, to recover that freshly generated secret the moment it
-// appears, computing a live code for it with auth.GenerateTOTPCode,
-// and only then supplying that code on stdin. Reading and writing
-// both happen on this one goroutine because the alternative, calling
-// runTOTPSetupUtility inline and reading its output only after it
-// returns, cannot work here at all: it would still be blocked
-// printing, and waiting on stdin, while this goroutine was still
-// blocked waiting for it to return before ever looking at what it
-// printed, a producer and consumer shaped deadlock. This relies on
-// etc/routercli.yaml existing relative to the test binary's own
-// working directory, the same assumption this project's own
-// --check-config smoke testing already makes.
-func TestRunTOTPSetupUtilitySuccess(t *testing.T) {
-	if _, err := os.Stat("etc/routercli.yaml"); err != nil {
-		t.Skipf("etc/routercli.yaml not found relative to the test working directory, skipping: %v", err)
-	}
-
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create a stdout pipe: %v", err)
-	}
-	stdinR, stdinW := io.Pipe()
-
-	doneCh := make(chan struct{})
-	go func() {
-		real := os.Stdout
-		os.Stdout = stdoutW
-		runTOTPSetupUtility("etc/routercli.yaml", "alice", stdinR)
-		os.Stdout = real
-		stdoutW.Close()
-		close(doneCh)
-	}()
-
-	// One single reader drains stdoutR for the whole test, both to
-	// find the secret line and, afterward, to collect the rest of the
-	// output, since a second, independent reader started later would
-	// race this one over the same pipe and each would only see part of
-	// the stream.
-	var soFar bytes.Buffer
-	buf := make([]byte, 4096)
-	readMore := func(t *testing.T) bool {
-		t.Helper()
-		n, rerr := stdoutR.Read(buf)
-		if n > 0 {
-			soFar.Write(buf[:n])
-		}
-		return rerr == nil
-	}
-	findSecret := func() string {
-		for _, line := range splitLines(soFar.String()) {
-			if trimmed := strings.TrimSpace(line); isBase32SecretLine(trimmed) {
-				return strings.ReplaceAll(trimmed, " ", "")
-			}
-		}
-		return ""
-	}
-
-	var secret string
-	deadline := time.Now().Add(5 * time.Second)
-	for secret == "" {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for runTOTPSetupUtility to print its TOTP secret, output so far:\n%s", soFar.String())
-		}
-		if !readMore(t) {
-			break
-		}
-		secret = findSecret()
-	}
-	if secret == "" {
-		t.Fatalf("runTOTPSetupUtility never printed a manually enterable secret, output so far:\n%s", soFar.String())
-	}
-
-	code, cerr := auth.GenerateTOTPCode(secret, time.Now())
-	if cerr != nil {
-		t.Fatalf("GenerateTOTPCode returned error: %v", cerr)
-	}
-	fmt.Fprintln(stdinW, code)
-	stdinW.Close()
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("runTOTPSetupUtility did not return after a valid confirmation code was supplied")
-	}
-	for readMore(t) {
-		// drain whatever remains until stdoutW.Close, above, produces EOF
-	}
-
-	full := soFar.String()
-	if !strings.Contains(full, "Confirmed") {
-		t.Errorf("expected runTOTPSetupUtility's output to confirm success, got:\n%s", full)
-	}
-	if !strings.Contains(full, secret) {
-		t.Errorf("expected runTOTPSetupUtility's output to print the totp_secret line for %q, got:\n%s", secret, full)
-	}
-}
-
-// isBase32SecretLine - This function reports whether trimmed looks
-// like the manually enterable secret line
-// auth.FormatTOTPSecretForDisplay produces, base32 alphabet
-// characters and spaces only, long enough to actually be a secret
-// rather than some other short, coincidentally base32-shaped word
-// runTOTPSetupUtility's surrounding text might contain.
-func isBase32SecretLine(trimmed string) bool {
-	if trimmed == "" || len(trimmed) < 16 {
-		return false
-	}
-	for _, r := range trimmed {
-		if r == ' ' {
-			continue
-		}
-		if (r < 'A' || r > 'Z') && (r < '2' || r > '7') {
-			return false
-		}
-	}
-	return true
-}
-
-// TestRunTOTPSetupUtilityWrongCodeExits - This test verifies the
-// failure path of runTOTPSetupUtility through main's own subprocess
-// helper, see main_subprocess_test.go, since a rejected confirmation
-// code calls os.Exit(1) directly, ending the real test process if
-// called in process the way TestRunTOTPSetupUtilitySuccess does
-// above. See runMainAsSubprocess's own doc comment for why this is
-// the accepted way to test an os.Exit call site at all.
-func TestRunTOTPSetupUtilityWrongCodeExits(t *testing.T) {
-	if _, err := os.Stat("etc/routercli.yaml"); err != nil {
-		t.Skipf("etc/routercli.yaml not found relative to the test working directory, skipping: %v", err)
-	}
-	stdout, stderr, code := runMainAsSubprocessWithStdin(t, "", strings.NewReader("000000\n"), "--mfa", "alice")
-	if code != 1 {
-		t.Errorf("exit code = %d, want 1 for a rejected confirmation code, stdout=%q stderr=%q", code, stdout, stderr)
-	}
-	if !strings.Contains(stderr, "did not verify") {
-		t.Errorf("expected stderr to explain the code did not verify, got %q", stderr)
 	}
 }

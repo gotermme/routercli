@@ -6,7 +6,9 @@
 package product
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -53,7 +55,15 @@ func init() {
 	})
 
 	command.Register("show.startup-config", func(ctx *command.AppContext, args []string) error {
-		fmt.Println(ctx.Translator.T("show.startup_config.text"))
+		data, err := os.ReadFile(ctx.StartupConfigFile)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Println(ctx.Translator.T("show.startup_config.text"))
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%s", ctx.Translator.T("show.startup_config.read_failed", err))
+		}
+		fmt.Print(string(data))
 		return nil
 	})
 }
@@ -131,27 +141,74 @@ func runningConfigLines(ctx *command.AppContext, state *ProductState) []string {
 // command.CommandLevelStack.PopToRoot, so nothing needs to back out of
 // the last interface block first.
 //
-// The "password manager <hash>" line reproduced here is a known,
-// separate limitation, not something this function set out to fix.
-// cmd_password_manager.go, in cmd/core, always prompts interactively
-// for a new secret and ignores any argument on its own command line,
-// so pasting this exact line back in starts a fresh prompt rather than
-// restoring the hash directly. It is left exactly as the previous
-// version of this function already printed it, recorded here rather
-// than quietly changed, since deciding what that line should actually
-// do once config persistence itself is built is its own separate
-// question.
+// The "password manager hash <hash>" line reproduced here for each
+// level's own ordinary, user settable PasswordHash relies on
+// cmd/core/cmd_password_manager.go's "password manager hash" command,
+// which accepts an already-hashed value directly rather than
+// prompting, exactly so this line can be pasted back in and restore
+// the same secret without ever exposing, or needing to know, the real
+// plaintext password. A level's own VendorDefinedPasswordHash renders
+// this same way only while the current session is somewhere with
+// RevealVendorDefinedSecrets set, su-config being the one level in
+// this project's own shipped tree that sets it; everywhere else it
+// renders as the "<HIDDEN>" placeholder instead. See
+// currentLevelRevealsVendorDefinedSecrets below.
+//
+// This block is still a known, separate limitation, one su-config
+// does not solve either: every level's own line is emitted together,
+// in one flat list, right after "configure terminal", rather than
+// each positioned inside a paste sequence that actually reenters that
+// specific level first. "password manager hash" only ever sets the
+// secret for whichever level ctx.Session.CommandLevel happens to be
+// while it runs, see that command's own doc comment, so this block,
+// pasted back in as is, would only ever affect the level a session is
+// actually sitting in at the time, not each named level individually.
+// su-config's own GrantsReplayTrust solves a different problem,
+// whether entering a gated level during a paste needs a fresh prompt
+// at all, not which level a "password manager hash" line inside that
+// paste actually targets. Getting every line positioned correctly
+// remains open, left for whichever future phase actually builds a
+// real paste or replay command, rather than solved by coincidence
+// here.
 func configModeLines(ctx *command.AppContext, state *ProductState) []string {
 	var lines []string
 
 	if state.Hostname != "" {
 		lines = append(lines, "hostname "+tokenize.QuoteIfNeeded(state.Hostname))
 	}
-	// See this function's own doc comment on why "password manager
-	// <hash>" is reproduced here unchanged rather than fixed.
+	if state.BannerMOTD != "" {
+		lines = append(lines, "banner motd "+tokenize.QuoteIfNeeded(state.BannerMOTD))
+	}
+	if state.BannerLogin != "" {
+		lines = append(lines, "banner login "+tokenize.QuoteIfNeeded(state.BannerLogin))
+	}
+	// See this function's own doc comment for why a vendor defined
+	// secret renders as a "<HIDDEN>" placeholder here, never its real
+	// value, while an ordinary, user settable secret renders in full.
+	// reveal is decided once, by which Command Level this session is
+	// actually sitting in right now, not per rendered level, since
+	// su-config's whole point is a session that already proved a
+	// real, live credential there gets to see everything, not a
+	// selective peek at one level at a time; see
+	// currentLevelRevealsVendorDefinedSecrets and
+	// command.CommandLevel.RevealVendorDefinedSecrets's own doc
+	// comment.
+	reveal := currentLevelRevealsVendorDefinedSecrets(ctx)
 	for _, level := range ctx.Levels.Order {
-		if level.PasswordHash != "" {
-			lines = append(lines, "password manager "+level.PasswordHash)
+		switch {
+		case level.VendorDefinedPasswordHash != "" && reveal:
+			lines = append(lines, "password manager hash "+level.VendorDefinedPasswordHash)
+		case level.VendorDefinedPasswordHash != "":
+			// "<HIDDEN>" is not itself a recognized hash, see
+			// auth.IsRecognizedHash, so pasting this exact line back in
+			// is refused rather than silently corrupting or clearing
+			// the real secret, on top of
+			// command.CommandLevel.UserSettablePassword already
+			// refusing "password manager hash" outright for a vendor
+			// defined level regardless of what value follows it.
+			lines = append(lines, "password manager hash <HIDDEN>")
+		case level.PasswordHash != "":
+			lines = append(lines, "password manager hash "+level.PasswordHash)
 		}
 	}
 
@@ -187,6 +244,32 @@ func configModeLines(ctx *command.AppContext, state *ProductState) []string {
 	return lines
 }
 
+// currentLevelRevealsVendorDefinedSecrets - This function reports
+// whether ctx.Session.CommandLevel currently names a Command Level
+// whose own RevealVendorDefinedSecrets is true, su-config being the
+// one level in this project's own shipped tree that sets it, see
+// var/tree/tree_structure.yaml. This reads a property off the current
+// level rather than comparing ctx.Session.CommandLevel against a
+// hardcoded "su-config" literal, the same generic,
+// read-a-property-rather-than-hardcode-a-level-name approach
+// command.CommandLevel.RevealVendorDefinedSecrets's own doc comment
+// describes, so a project renaming or restructuring its own version
+// of this level never needs to touch this function. false, safely,
+// whenever ctx.Levels or ctx.Session is nil, or ctx.Session.CommandLevel
+// does not resolve to a real, loaded level at all, the same
+// unconfigured-context safety cmd_password_manager.go's own current
+// level lookup follows.
+func currentLevelRevealsVendorDefinedSecrets(ctx *command.AppContext) bool {
+	if ctx.Levels == nil || ctx.Session == nil {
+		return false
+	}
+	level, ok := ctx.Levels.ByName[ctx.Session.CommandLevel]
+	if !ok {
+		return false
+	}
+	return level.RevealVendorDefinedSecrets
+}
+
 // configEnterWords - This function returns the literal words that
 // move a session from exec into config mode, "configure terminal" in
 // this project today, discovered from the exec level's own tree
@@ -200,6 +283,23 @@ func configModeLines(ctx *command.AppContext, state *ProductState) []string {
 // wrapper lines out entirely rather than guessing at them.
 func configEnterWords(ctx *command.AppContext) ([]string, bool) {
 	return levelEnterWords(ctx, "config")
+}
+
+// execEnterWords - This function does the same thing as
+// configEnterWords, for entering exec from base, "enable" in this
+// project's own shipped tree. "show running-config" itself never
+// needs this: it is only ever reachable from inside exec in the first
+// place, matching real Cisco and HP, so a live session viewing it, or
+// pasting its output back in by hand, is already assumed to have
+// elevated to exec first. cmd_startup_config.go's own "copy
+// running-config startup-config" is the one caller that does need
+// this, prepending it to what actually gets written to
+// StartupConfigFile, since a fresh process replaying that file back
+// in at boot, see main.go's own loadStartupConfig, starts completely
+// cold, at base, with nobody having typed "enable" by hand first the
+// way an interactive paste always assumes.
+func execEnterWords(ctx *command.AppContext) ([]string, bool) {
+	return levelEnterWords(ctx, "exec")
 }
 
 // interfaceEnterWords - This function does the same thing as

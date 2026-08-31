@@ -6,6 +6,8 @@
 package command
 
 import (
+	"time"
+
 	"github.com/gologme/log"
 	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/i18n"
@@ -134,6 +136,32 @@ type Command struct {
 	Hidden       bool   `yaml:"hidden"`
 	Negatable    bool   `yaml:"negatable"`
 	PasswordHash string `yaml:"password_hash"`
+
+	// VendorDefinedPasswordHash is a bcrypt hash baked into the tree
+	// by whoever built this product, gating this command exactly the
+	// way PasswordHash does, but never meant to be seen or changed by
+	// an ordinary end user, only known out of band by support staff
+	// or a sales engineer. See EffectivePasswordHash and
+	// UserSettablePassword below for exactly how this interacts with
+	// PasswordHash, and var/tree/README.md for the full explanation,
+	// including the rules the configuration checker enforces around
+	// this field: a command setting VendorDefinedPasswordHash MUST
+	// also set Hidden true, and MUST NOT set PasswordUserSettable
+	// true or set PasswordHash at the same time.
+	VendorDefinedPasswordHash string `yaml:"vendor_defined_password_hash"`
+
+	// PasswordUserSettable controls whether an end user is allowed to
+	// set or change this command's own secret at all. This is a
+	// *bool, not a plain bool, so that leaving it out of a tree file
+	// entirely, the overwhelming common case today, keeps today's
+	// actual behavior, true, rather than silently locking every
+	// existing command's password the moment this field was added.
+	// See UserSettablePassword below for how a nil value, an
+	// explicit true, and an explicit false are each resolved, and
+	// why VendorDefinedPasswordHash being set always wins regardless
+	// of what this field says.
+	PasswordUserSettable *bool `yaml:"password_user_settable"`
+
 	MinArgs      *int   `yaml:"minargs"`
 	MaxArgs      *int   `yaml:"maxargs"`
 	MaxArgLength int    `yaml:"maxarglength"`
@@ -192,6 +220,40 @@ type Command struct {
 	// its own commands as common, only LoadTreeStructure itself knows
 	// which tree it loaded as the common one.
 	IsCommonCommand bool `yaml:"-"`
+}
+
+// EffectivePasswordHash returns whichever hash actually gates this
+// command right now: VendorDefinedPasswordHash when it is set,
+// otherwise PasswordHash. The two are never both meaningful at once,
+// see VerifyVendorDefinedSecrets in verify.go, which refuses a tree
+// that sets both on the same command, so callers checking whether a
+// command is password gated at all, and callers actually verifying a
+// typed candidate against the stored secret, both call this rather
+// than reading either field directly.
+func (c *Command) EffectivePasswordHash() string {
+	if c.VendorDefinedPasswordHash != "" {
+		return c.VendorDefinedPasswordHash
+	}
+	return c.PasswordHash
+}
+
+// UserSettablePassword reports whether an end user is allowed to set
+// or change this command's own PasswordHash at all. A command
+// carrying a VendorDefinedPasswordHash is never user settable,
+// regardless of what PasswordUserSettable itself says, matching
+// var/tree/README.md's own rule that a vendor defined secret is never
+// end user changeable. Otherwise this follows PasswordUserSettable
+// directly: nil, meaning the tree file never set it, resolves to
+// true, today's actual behavior, and an explicit true or false is
+// honored as written.
+func (c *Command) UserSettablePassword() bool {
+	if c.VendorDefinedPasswordHash != "" {
+		return false
+	}
+	if c.PasswordUserSettable != nil {
+		return *c.PasswordUserSettable
+	}
+	return true
 }
 
 // ListOptions - This type controls how a listing of more than one
@@ -317,12 +379,22 @@ type ResolveResult struct {
 // some other channel. This is empty if AuthRequired is off, the same
 // as Users itself.
 //
+// StartupConfigFile is config.SystemConfig.StartupConfigFile, copied
+// here once at startup the same reason UsersFile is, so su-config's
+// own "copy running-config startup-config", "erase startup-config",
+// and "show startup-config" commands, in cmd/product, can read and
+// write the one file main.go itself already knows the path to,
+// without cmd/product needing any dependency on package config
+// either. Unlike UsersFile this is never empty; StartupConfigFile has
+// a real default even when nothing in etc/routercli.yaml overrides
+// it, see config.DefaultSystemConfig.
+//
 // TOTPIssuer is the name shown in a user's authenticator app next to
 // their account name, passed straight through to
 // auth.TOTPProvisioningURI. This mirrors config.SystemConfig's own
-// TOTPIssuer setting, so a handler enrolling a user in TOTP mid-
-// session presents the same issuer name main.go's --mfa flag already
-// does.
+// TOTPIssuer setting, so a session enrolling in TOTP mid-session,
+// totp enable in package core (cmd/core), presents the same issuer
+// name a fresh login prompt would.
 //
 // TOTPMaxAttempts is how many times in a row a handler such as totp
 // enable or totp disable lets a session retype a rejected TOTP code
@@ -418,13 +490,14 @@ type ResolveResult struct {
 // explicitly rather than relying on the zero value doing the right
 // thing.
 type AppContext struct {
-	State           any
-	Logger          *log.Logger
-	Session         *auth.Session
-	Users           auth.Users
-	UsersFile       string
-	TOTPIssuer      string
-	TOTPMaxAttempts int
+	State             any
+	Logger            *log.Logger
+	Session           *auth.Session
+	Users             auth.Users
+	UsersFile         string
+	StartupConfigFile string
+	TOTPIssuer        string
+	TOTPMaxAttempts   int
 
 	PasswordPolicy            auth.PasswordPolicy
 	PasswordChangeMaxAttempts int
@@ -487,6 +560,136 @@ type AppContext struct {
 	// same idea. See cmd/core/cmd_terminal.go's "terminal width"
 	// handler, the only place this is ever written.
 	TerminalWidth *int
+
+	// HistoryFile is config.SystemConfig.HistoryFile, copied here once
+	// at startup, resolved to its real, final path first, see
+	// historyFilePath in main.go for what an unset config value falls
+	// back to. This is the same file readline.Config.HistoryFile is
+	// opened against, and readline appends a submitted line to it
+	// immediately, see opHistory.Update in the readline library, so
+	// this field always names a file that is live and in sync with
+	// what a session has actually typed. See cmd/core/cmd_show.go's
+	// "show history" handler, the only place this is ever read.
+	HistoryFile string
+
+	// HistorySize is the live, per session override for "terminal
+	// history size <n>", nil until that command is typed, matching the
+	// same shape PageLines and TerminalWidth above already use for a
+	// session scoped, never persisted override. It governs how many of
+	// the most recent lines "show history" prints back, see
+	// EffectiveHistorySize below and cmd/core/cmd_show.go's
+	// historyLines.
+	//
+	// It deliberately does not also govern this session's own Up and
+	// Down arrow recall, unlike PageLines and TerminalWidth's own live
+	// effect on their real, functional counterparts. That recall limit,
+	// readline.Config.HistoryLimit, is read by an unsynchronized
+	// background goroutine github.com/chzyer/readline itself starts
+	// for the life of the Instance, so main.go seeds it once, from
+	// DefaultHistorySize, when that Instance is constructed, and never
+	// reassigns it again; doing so from outside that goroutine, once
+	// discovered, was a genuine data race, not merely a theoretical
+	// one. See main.go's own readline.Config construction for the full
+	// reasoning. See cmd/core/cmd_history.go's "terminal history size"
+	// handler, the only place HistorySize is ever written.
+	HistorySize *int
+
+	// DefaultHistorySize is config.SystemConfig.DefaultHistorySize,
+	// copied here once at startup, the fallback EffectiveHistorySize
+	// returns whenever HistorySize is unset.
+	DefaultHistorySize int
+
+	// ReauthGracePeriod is config.SystemConfig.ReauthGracePeriod,
+	// copied here once at startup, how long EnterCommandLevel honors a
+	// Command Level's own LastAuthenticatedAt before treating it as
+	// stale and prompting again. A session that authenticated into a
+	// level, left, and came right back within this window is let back
+	// in without being asked again, the same shape sudo's own cached
+	// authentication uses on a Linux system. Zero, the default, turns
+	// this off entirely, every entry always prompts, matching this
+	// project's original behavior. This is deliberately a short,
+	// narrowly scoped convenience for a session stepping back into a
+	// level it only just left, not a way to stay trusted through a
+	// whole work session; see ElevationTimeout in main.go for the
+	// unrelated, longer running case of demoting a session that has
+	// sat elevated too long with nothing typed.
+	ReauthGracePeriod time.Duration
+
+	// SuConfigTrustWindow is config.SystemConfig.SuConfigTrustWindow,
+	// copied here once at startup, how long a real, live credential
+	// check succeeding at a level whose own GrantsReplayTrust is true
+	// is trusted broadly enough to waive the password prompt for
+	// every other level's own EnterCommand too, see
+	// withinSuConfigTrust in treestructure.go. This is a deliberately
+	// different, broader mechanism from ReauthGracePeriod above,
+	// which only ever waives a level's own prompt for itself. Zero
+	// turns this off entirely; every level, including one with
+	// GrantsReplayTrust set, always prompts, and su-config becomes
+	// only a place to view and manage configuration, never a shortcut
+	// past any other level's own password. See su-config's own doc
+	// comment, and var/tree/README.md, for the full reasoning behind
+	// why this exists at all: replaying a whole saved configuration
+	// back in without hitting a prompt at every gated level along the
+	// way, without ever treating a hash recorded inside that replayed
+	// text as proof that anyone typed it, the real, live check
+	// happened once, here, at su-config's own entry, not anywhere
+	// inside the replayed text itself.
+	SuConfigTrustWindow time.Duration
+
+	// ReplayingStartupConfig is true for exactly the duration of one
+	// trusted ReplayLines call, see replay.go, main.go's own boot time
+	// StartupConfigFile load being the one real caller today. While
+	// true, EnterCommandLevel waves through any password protected
+	// Command Level along the way with no prompt at all, and never
+	// sets that level's own LastAuthenticatedAt while doing so, the
+	// same "does not chain any further trust" reasoning
+	// withinSuConfigTrust's own case already follows.
+	//
+	// This is a third, deliberately separate kind of trust from
+	// ReauthGracePeriod and SuConfigTrustWindow above, not a variation
+	// on either. Both of those exist to waive a prompt for a live
+	// session that, at some point in this same run of the program,
+	// already answered one for real, a real, live credential typed at
+	// a real terminal, still the only thing that is ever allowed to
+	// set a Command Level's own LastAuthenticatedAt. ReplayingStartupConfig
+	// answers a different question entirely: nobody has typed anything
+	// yet at all, no Session even exists yet the first time this is
+	// used, main.go sets it before establishSession is ever called.
+	// The trust here comes from what it means for this code to be
+	// running in the first place, the operating system already
+	// decided this process gets to run as whichever account it runs
+	// as, and that account already has read access to
+	// StartupConfigFile on disk, the same "starting the program at
+	// all is itself the trust event" reasoning recorded in this
+	// project's own design history for boot time configuration
+	// loading. See ReplayLines' own doc comment for the corresponding
+	// caller side, and loadStartupConfig in main.go for where this is
+	// actually set, always through a deferred reset back to false, so
+	// this window can never be left open past the one call it exists
+	// for. Nothing a live, interactive session can type ever sets
+	// this field; it exists purely for main.go's own internal use
+	// before any session begins.
+	ReplayingStartupConfig bool
+}
+
+// EffectiveHistorySize returns how many of the most recent lines
+// "show history" should show, see cmd/core/cmd_show.go's
+// historyLines, the one caller. It follows the exact same override,
+// fallback shape paging.EffectivePageLines already uses for page
+// size: ctx.HistorySize, once "terminal history size <n>" has been
+// typed this session, exactly as given, including zero, "terminal
+// history size 0", for showing nothing at all; ctx.DefaultHistorySize
+// otherwise, the deployment's own configured default before any
+// session has typed anything. See HistorySize's own doc comment for
+// why this deliberately has no effect on readline's own separate Up
+// and Down arrow recall limit, fixed instead at whatever
+// DefaultHistorySize was when this session's own readline.Instance
+// was constructed.
+func EffectiveHistorySize(ctx *AppContext) int {
+	if ctx.HistorySize != nil {
+		return *ctx.HistorySize
+	}
+	return ctx.DefaultHistorySize
 }
 
 // Auditor - This type is the minimal interface AppContext needs from
@@ -616,6 +819,82 @@ type CommandLevel struct {
 	// into a whole level. A project can use either, both, or neither.
 	PasswordHash string `yaml:"password_hash"`
 
+	// VendorDefinedPasswordHash is a bcrypt hash baked in by whoever
+	// built this product, gating EnterCommand exactly the way
+	// PasswordHash does, but never meant to be seen or changed by an
+	// ordinary end user, only known out of band by support staff or a
+	// sales engineer. See EffectivePasswordHash and
+	// UserSettablePassword below for exactly how this interacts with
+	// PasswordHash, and var/tree/README.md for the full explanation,
+	// including the rules the configuration checker enforces: a level
+	// setting VendorDefinedPasswordHash MUST also set Hidden true,
+	// and MUST NOT set PasswordUserSettable true or set PasswordHash
+	// at the same time.
+	VendorDefinedPasswordHash string `yaml:"vendor_defined_password_hash"`
+
+	// PasswordUserSettable controls whether "password manager", see
+	// cmd/core/cmd_password_manager.go, is allowed to change this
+	// level's own PasswordHash at all. This is a *bool, not a plain
+	// bool, so that leaving it out of a tree_structure.yaml entry
+	// entirely, the overwhelming common case today, keeps today's
+	// actual behavior, true, rather than silently locking every
+	// existing level's password the moment this field was added. See
+	// UserSettablePassword below for how a nil value, an explicit
+	// true, and an explicit false are each resolved, and why
+	// VendorDefinedPasswordHash being set always wins regardless of
+	// what this field says.
+	PasswordUserSettable *bool `yaml:"password_user_settable"`
+
+	// Hidden marks this level itself as one that ought to stay out of
+	// ordinary discovery, the CommandLevel counterpart to Command's
+	// own Hidden field. It has no runtime effect of its own inside
+	// this package; a level is really only reachable in the first
+	// place through its EnterCommand, and whatever tree file exposes
+	// that command as a visible entry is what actually controls tab
+	// completion and help output. This field exists so the
+	// configuration checker has something concrete to require: a
+	// level carrying a VendorDefinedPasswordHash MUST set this true,
+	// recording, in the manifest itself, that whoever built this
+	// product also marked the matching EnterCommand entry hidden in
+	// its own tree file. See verify.go's VerifyVendorDefinedSecrets.
+	Hidden bool `yaml:"hidden"`
+
+	// GrantsReplayTrust marks this level as one whose own EnterCommand
+	// requires a real, live, freshly typed credential check, never
+	// satisfiable from inside pasted or replayed text itself, and
+	// whose recent success is trusted broadly enough that entering
+	// this level recently is, on its own, accepted in place of every
+	// other level's own password check for the AppContext.SuConfigTrustWindow
+	// duration that follows. See withinSuConfigTrust in
+	// treestructure.go for exactly how EnterCommandLevel uses this,
+	// and su-config, this project's own dedicated level for replaying
+	// a whole saved configuration accurately, for the level this
+	// property is meant for. The default, false, is every ordinary
+	// level's setting; a level this is set on had better also require
+	// a real credential, PasswordHash or VendorDefinedPasswordHash,
+	// of its own, or it grants a free pass to every other level's
+	// password for nothing at all in return, exactly the "risk bucket
+	// 3" pass the hash shaped mistake this whole mechanism exists to
+	// avoid, see var/tree/README.md's own fuller explanation.
+	GrantsReplayTrust bool `yaml:"grants_replay_trust"`
+
+	// RevealVendorDefinedSecrets marks this level as one where a
+	// rendering function, "show running-config" in
+	// cmd/product/cmd_show.go for instance, is allowed to reveal a
+	// VendorDefinedPasswordHash's real value rather than the
+	// "<HIDDEN>" placeholder it renders everywhere else. This has no
+	// effect anywhere inside package command itself; it is purely a
+	// signal a project's own rendering code reads off
+	// ctx.Levels.ByName[ctx.Session.CommandLevel] to decide what to
+	// show, the same generic, read-a-property-rather-than-hardcode-a-
+	// level-name approach this whole file already follows elsewhere.
+	// The default, false, is every ordinary level's setting; this is
+	// meant for su-config alone, since it exists specifically to give
+	// a real, live authenticated session, one that already knows or
+	// is choosing to record a vendor secret, a place to actually see
+	// it.
+	RevealVendorDefinedSecrets bool `yaml:"reveal_vendor_defined_secrets"`
+
 	// PromptSuffix is appended to the prompt while this level, or a
 	// mode pushed from it such as config interface on top of config,
 	// is current, for example "(config)". This is purely manifest
@@ -647,6 +926,58 @@ type CommandLevel struct {
 	// happens, it just means rate limiting is not active yet. It is
 	// not decoded from YAML.
 	RateLimiter *auth.RateLimiter `yaml:"-"`
+
+	// LastAuthenticatedAt records the moment PasswordHash was last
+	// actually verified against a real, live typed candidate,
+	// successfully, by EnterCommandLevel below. It stays at its zero
+	// value until that first happens, and is never set by anything
+	// that only sets what PasswordHash itself equals, such as
+	// cmd/core/cmd_password_manager.go's own hash accepting form,
+	// since setting a stored secret is never treated as proof that
+	// anyone actually typed it. EnterCommandLevel checks this, against
+	// AppContext.ReauthGracePeriod, before ever prompting again: a
+	// session that authenticated into this level recently enough is
+	// let back in without being asked a second time, the same shape
+	// sudo's own cached authentication uses on a Linux system, not a
+	// blanket bypass, only a short memory of a real, already answered
+	// prompt. It is not decoded from YAML, and it is not persisted
+	// anywhere; a fresh process starts every level at its zero value
+	// regardless of how recently the previous run authenticated.
+	LastAuthenticatedAt time.Time `yaml:"-"`
+}
+
+// EffectivePasswordHash returns whichever hash actually gates
+// EnterCommand for this level right now: VendorDefinedPasswordHash
+// when it is set, otherwise PasswordHash. The two are never both
+// meaningful at once, see VerifyVendorDefinedSecrets in verify.go,
+// which refuses a tree that sets both on the same level, so
+// EnterCommandLevel, and anything else asking whether a level is
+// password gated at all, call this rather than reading either field
+// directly.
+func (cl *CommandLevel) EffectivePasswordHash() string {
+	if cl.VendorDefinedPasswordHash != "" {
+		return cl.VendorDefinedPasswordHash
+	}
+	return cl.PasswordHash
+}
+
+// UserSettablePassword reports whether "password manager" is allowed
+// to change this level's own PasswordHash at all. A level carrying a
+// VendorDefinedPasswordHash is never user settable, regardless of
+// what PasswordUserSettable itself says, matching
+// var/tree/README.md's own rule that a vendor defined secret is
+// never end user changeable. Otherwise this follows
+// PasswordUserSettable directly: nil, meaning the manifest never set
+// it, resolves to true, today's actual behavior, and an explicit
+// true or false is honored as written.
+func (cl *CommandLevel) UserSettablePassword() bool {
+	if cl.VendorDefinedPasswordHash != "" {
+		return false
+	}
+	if cl.PasswordUserSettable != nil {
+		return *cl.PasswordUserSettable
+	}
+	return true
 }
 
 // TreeStructure - This type is the whole loaded, validated manifest,

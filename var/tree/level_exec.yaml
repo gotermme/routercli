@@ -5,6 +5,10 @@ commands:
   show:
     desc_key: show.desc
     subcommands:
+      history:
+        desc_key: show.history.desc
+        pageable: true
+        run: show.history
       interface:
         desc_key: show.interface.desc
         pageable: true
@@ -33,6 +37,10 @@ commands:
   diagnostic-mode:
     desc_key: diagnostic_mode.desc
     run: diagnostic-mode
+
+  su-config:
+    desc_key: su_config.desc
+    run: su-config
 
   configure:
     desc_key: configure.desc

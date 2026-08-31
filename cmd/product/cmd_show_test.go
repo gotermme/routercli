@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gotermme/routercli/auth"
 	_ "github.com/gotermme/routercli/cmd/core"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/i18n"
@@ -100,6 +101,8 @@ func TestShowRunningConfigHandlerIncludesEveryConfiguredValue(t *testing.T) {
 	state.Description = "a lab router"
 	state.Interface("eth0").Description = "uplink"
 	state.Interface("eth1").Shutdown = true
+	state.BannerMOTD = "welcome"
+	state.BannerLogin = "please authenticate"
 	cmd := loadTestCommand(t, "show.running-config")
 
 	var runErr error
@@ -108,7 +111,7 @@ func TestShowRunningConfigHandlerIncludesEveryConfiguredValue(t *testing.T) {
 		t.Fatalf("show.running-config handler returned unexpected error: %v", runErr)
 	}
 
-	for _, want := range []string{"myrouter", "a lab router", "eth0", "uplink", "eth1", "shutdown"} {
+	for _, want := range []string{"myrouter", "a lab router", "eth0", "uplink", "eth1", "shutdown", "banner motd welcome", "banner login \"please authenticate\""} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show running-config output missing %q, got:\n%s", want, out)
 		}
@@ -130,7 +133,7 @@ func TestShowRunningConfigHandlerOmitsNeverConfiguredValues(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("show.running-config handler returned unexpected error: %v", runErr)
 	}
-	for _, unwanted := range []string{"hostname", "terminal width", "set description"} {
+	for _, unwanted := range []string{"hostname", "terminal width", "set description", "banner motd", "banner login"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("show running-config output unexpectedly contains %q for an unconfigured value, got:\n%s", unwanted, out)
 		}
@@ -335,5 +338,227 @@ func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
 	}
 	if replayCtx.Position.Current().Name != "exec" {
 		t.Errorf("expected the replayed session to land back at exec (from \"end\"), got %q", replayCtx.Position.Current().Name)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// configModeLines, password rendering
+//
+// ----------------------------------------------------------------------
+
+// TestConfigModeLinesRendersOrdinaryPasswordHashInFull - This test
+// verifies that a level's ordinary, user settable PasswordHash renders
+// as a real "password manager hash <hash>" line, restorable by
+// cmd/core/cmd_password_manager.go's own hash accepting form.
+func TestConfigModeLinesRendersOrdinaryPasswordHashInFull(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{Order: []*command.CommandLevel{
+		{Name: "exec", PasswordHash: "$6$$ordinaryhash"},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "password manager hash $6$$ordinaryhash") {
+		t.Errorf("expected the ordinary hash to be reproduced in full, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesHidesVendorDefinedPasswordHash - This test
+// verifies the actual security property Task 5 exists for: a level's
+// VendorDefinedPasswordHash never appears anywhere in
+// configModeLines' output, in any form, replaced instead with the
+// literal "<HIDDEN>" placeholder. This asserts both directions,
+// the placeholder is present, and the real vendor hash string is
+// absent from the joined output entirely, not just missing from the
+// one line a reader might think to check.
+func TestConfigModeLinesHidesVendorDefinedPasswordHash(t *testing.T) {
+	const vendorHash = "$6$$super-secret-vendor-hash"
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{Order: []*command.CommandLevel{
+		{Name: "diagnostic", VendorDefinedPasswordHash: vendorHash, Hidden: true},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "password manager hash <HIDDEN>") {
+		t.Errorf("expected a \"password manager hash <HIDDEN>\" placeholder line, got:\n%s", joined)
+	}
+	if strings.Contains(joined, vendorHash) {
+		t.Errorf("expected the real vendor defined hash to never appear in output, but it did:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesVendorDefinedWinsOverOrdinaryHash - This test
+// verifies that a level carrying both fields at once, itself a
+// configuration command.VerifyVendorDefinedSecrets refuses to allow,
+// still renders safely: the placeholder, never the ordinary hash,
+// since a caller could still construct this combination directly in
+// Go, bypassing YAML and the configuration checker entirely, and
+// rendering must never be the path that leaks a secret a stricter
+// check elsewhere assumed was unreachable.
+func TestConfigModeLinesVendorDefinedWinsOverOrdinaryHash(t *testing.T) {
+	const vendorHash = "$6$$vendor-wins-hash"
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{Order: []*command.CommandLevel{
+		{Name: "diagnostic", PasswordHash: "$6$$ordinaryhash", VendorDefinedPasswordHash: vendorHash, Hidden: true},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "password manager hash <HIDDEN>") {
+		t.Errorf("expected the placeholder to win when both fields are set, got:\n%s", joined)
+	}
+	if strings.Contains(joined, vendorHash) || strings.Contains(joined, "ordinaryhash") {
+		t.Errorf("expected neither hash to appear in output when both fields are set, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesRevealsVendorDefinedHashWhenSessionGrantsReveal -
+// This test verifies the su-config side of Task 6: once the current
+// session sits at a Command Level whose own RevealVendorDefinedSecrets
+// is true, a level's VendorDefinedPasswordHash renders in full, the
+// same as an ordinary PasswordHash always does, rather than the
+// "<HIDDEN>" placeholder TestConfigModeLinesHidesVendorDefinedPasswordHash
+// above confirms for every other session.
+func TestConfigModeLinesRevealsVendorDefinedHashWhenSessionGrantsReveal(t *testing.T) {
+	const vendorHash = "$6$$super-secret-vendor-hash"
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{
+		Order: []*command.CommandLevel{
+			{Name: "diagnostic", VendorDefinedPasswordHash: vendorHash, Hidden: true},
+		},
+		ByName: map[string]*command.CommandLevel{
+			"su-config": {Name: "su-config", RevealVendorDefinedSecrets: true},
+		},
+	}
+	ctx.Session = &auth.Session{CommandLevel: "su-config"}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "password manager hash "+vendorHash) {
+		t.Errorf("expected the real vendor defined hash to be revealed while sitting in su-config, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "<HIDDEN>") {
+		t.Errorf("expected no \"<HIDDEN>\" placeholder while sitting in su-config, got:\n%s", joined)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// currentLevelRevealsVendorDefinedSecrets
+//
+// ----------------------------------------------------------------------
+
+// TestCurrentLevelRevealsVendorDefinedSecretsTrueAtRevealingLevel -
+// This test verifies the ordinary case: the current session's own
+// Command Level carries RevealVendorDefinedSecrets true.
+func TestCurrentLevelRevealsVendorDefinedSecretsTrueAtRevealingLevel(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"su-config": {Name: "su-config", RevealVendorDefinedSecrets: true},
+	}}
+	ctx.Session = &auth.Session{CommandLevel: "su-config"}
+
+	if !currentLevelRevealsVendorDefinedSecrets(ctx) {
+		t.Error("expected true while sitting at a level with RevealVendorDefinedSecrets set")
+	}
+}
+
+// TestCurrentLevelRevealsVendorDefinedSecretsFalseAtOtherLevel - This
+// test verifies that an ordinary level, exec here, with
+// RevealVendorDefinedSecrets left at its zero value, never reveals
+// anything, even though some other loaded level, su-config here, does.
+func TestCurrentLevelRevealsVendorDefinedSecretsFalseAtOtherLevel(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"exec":      {Name: "exec"},
+		"su-config": {Name: "su-config", RevealVendorDefinedSecrets: true},
+	}}
+	ctx.Session = &auth.Session{CommandLevel: "exec"}
+
+	if currentLevelRevealsVendorDefinedSecrets(ctx) {
+		t.Error("expected false while sitting at exec, which does not set RevealVendorDefinedSecrets")
+	}
+}
+
+// TestCurrentLevelRevealsVendorDefinedSecretsFalseWithoutContext -
+// This test verifies the safe, false default whenever ctx.Levels or
+// ctx.Session is nil, or ctx.Session.CommandLevel does not resolve to
+// a real, loaded level, the same unconfigured-context safety
+// cmd_password_manager.go's own current level lookup follows.
+func TestCurrentLevelRevealsVendorDefinedSecretsFalseWithoutContext(t *testing.T) {
+	nilLevels := newTestContext()
+	nilLevels.Session = &auth.Session{CommandLevel: "su-config"}
+	if currentLevelRevealsVendorDefinedSecrets(nilLevels) {
+		t.Error("expected false when ctx.Levels is nil")
+	}
+
+	nilSession := newTestContext()
+	nilSession.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"su-config": {Name: "su-config", RevealVendorDefinedSecrets: true},
+	}}
+	if currentLevelRevealsVendorDefinedSecrets(nilSession) {
+		t.Error("expected false when ctx.Session is nil")
+	}
+
+	unresolvedLevel := newTestContext()
+	unresolvedLevel.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{}}
+	unresolvedLevel.Session = &auth.Session{CommandLevel: "su-config"}
+	if currentLevelRevealsVendorDefinedSecrets(unresolvedLevel) {
+		t.Error("expected false when ctx.Session.CommandLevel does not resolve to a loaded level")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// show startup-config, real file backed
+//
+// ----------------------------------------------------------------------
+
+// TestShowStartupConfigHandlerPrintsFileContentsWhenPresent - This
+// test verifies that "show startup-config" prints ctx.StartupConfigFile's
+// own real content once something has actually been saved there, in
+// place of TestShowStartupConfigHandlerReturnsNoError's own "nothing
+// saved yet" case.
+func TestShowStartupConfigHandlerPrintsFileContentsWhenPresent(t *testing.T) {
+	ctx := newTestContext()
+	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config")
+	const saved = "! (example running-config)\nhostname myrouter\n!\n"
+	if err := os.WriteFile(ctx.StartupConfigFile, []byte(saved), 0640); err != nil {
+		t.Fatalf("failed to seed startup-config file: %v", err)
+	}
+	cmd := loadTestCommand(t, "show.startup-config")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, nil) })
+	if runErr != nil {
+		t.Fatalf("show.startup-config handler returned unexpected error: %v", runErr)
+	}
+	if out != saved {
+		t.Errorf("show startup-config output = %q, want %q", out, saved)
+	}
+}
+
+// TestShowStartupConfigHandlerReturnsErrorOnReadFailure - This test
+// verifies that a read failure other than the file simply not existing
+// yet, ctx.StartupConfigFile naming a directory here, is reported back
+// as a real error rather than silently treated the same as "nothing
+// saved yet".
+func TestShowStartupConfigHandlerReturnsErrorOnReadFailure(t *testing.T) {
+	ctx := newTestContext()
+	ctx.StartupConfigFile = t.TempDir()
+	cmd := loadTestCommand(t, "show.startup-config")
+
+	if err := cmd.RunFunc(ctx, nil); err == nil {
+		t.Fatal("expected an error when ctx.StartupConfigFile names a directory, got nil")
 	}
 }

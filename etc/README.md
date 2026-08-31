@@ -27,7 +27,11 @@ This is the path and filename for the main RouterCLI system log file. The defaul
 
 #### `HistoryFile`
 
-This is the path and filename to the readline history file. The default is `var/log/history.log`.
+This is the path and filename to the readline history file. The default is `var/log/history.log`. Unlike a real Cisco or HP device's own small, in memory command history, this file is a genuine, persistent, cross-session log; every command a session submits is appended to it immediately, and it is never truncated or cleared by anything RouterCLI itself does. `show history` reads this same file back, see `DefaultHistorySize` below for how many of its most recent lines that command shows.
+
+#### `DefaultHistorySize`
+
+This property fixes how many past commands a session's own Up and Down arrow recall remembers, for the whole life of that session, and sets how many lines `show history` shows until a session types `terminal history size <n>` itself. The default is `500`, matching the underlying readline library's own built in default. Only the `show history` behavior can change after a session starts; the Up and Down arrow recall limit stays fixed at this value for that session regardless of anything typed afterward.
 
 #### `AuditLogFile`
 
@@ -61,6 +65,18 @@ This property defines how long the read loop needs to wait for a line of input b
 
 This property defines how long a session stays at a non-base Command Level before automatically reverting to the base level (e.g., `5m`), using the Go duration syntax. Checked once per read loop iteration, so a session sitting idle past this timeout is demoted the next time any line is entered, not through a background timer, since there is nothing useful to do before the user interacts with the CLI again anyway. The default is `0` (disabled).
 
+#### `ReauthGracePeriod`
+
+This property defines how long a Command Level's own password check is skipped after it was last actually answered, for that same level, in this run of the program, using the Go duration syntax. A session that leaves a password gated level and comes right back within this window is let back in without being prompted a second time, the same way `sudo` on a Linux system remembers a recent authentication for a short while rather than asking every single time. The default is `0` (disabled), every entry always prompts.
+
+This is a different property from `ElevationTimeout` above, not a longer or shorter version of the same idea. `ElevationTimeout` demotes a session that has stayed elevated too long with nothing typed. `ReauthGracePeriod` is only about a session that already left a level and is trying to get back in; it has no effect at all on a session that is still inside a level right now. A short value, on the order of one minute, is recommended: long enough to cover someone stepping out of a level by accident and straight back in, short enough that a terminal left unattended shortly after stepping down is not still trusted for long. This property must never be relied on to let a whole saved configuration paste back in without prompting for every gated level along the way; that is a different, separate mechanism, `SuConfigTrustWindow` below, meant specifically for that, since a recent authentication into one level must never, by itself, grant entry into a different one it was never actually checked against.
+
+#### `SuConfigTrustWindow`
+
+This property defines how long a real, live password check succeeding at a Command Level marked `grants_replay_trust` in its own tree file, see `var/tree/README.md`, is trusted broadly enough to also waive every other Command Level's own password check, using the Go duration syntax. This is what lets a whole saved configuration, `show running-config`'s own output for instance, paste back in and reproduce the exact same access it had before, without stopping at a fresh prompt every time the pasted text moves into another gated level, while still requiring one, and only one, real, live, freshly typed credential to unlock any of it. Nothing inside pasted or replayed text can ever satisfy this on its own; see `su-config`, this project's own Command Level built for exactly this, in `var/tree/README.md`, for the mechanism this property actually controls.
+
+Unlike every other timeout on this page, the default here is not `0` (disabled); it is `5m`. `SuConfigTrustWindow` at `0` would leave `su-config` unable to do the one job it exists for, so this ships enabled, long enough to type or paste even a sizeable configuration by hand, short enough that it is never mistaken for a standing, general purpose bypass. A deployment that wants `su-config` to only ever be a place to view and manage configuration, never a shortcut past any other level's own password, sets this to `0`.
+
 ### Command Tree Settings
 
 #### `TreeStructure`
@@ -70,6 +86,12 @@ This is the path and filename to the tree structure manifest file. The default i
 #### `CommonTreeFile`
 
 This is the path and filename to the file defining the commands common to every Command Level (i.e., `help`, `exit`, `end`). These will be merged into every level at load time unless that level sets `skip_common`. The default is `var/tree/level_common.yaml`.
+
+#### `StartupConfigFile`
+
+This is the path and filename `su-config`'s own `copy running-config startup-config` and `erase startup-config` commands read and write, see `var/tree/README.md`'s own `su-config` section. `show startup-config` reads the same file back out. The default is `var/startup-config/startup-config`, its own dedicated directory under `var/`, matching how `var/lang/` and `var/tree/` each get their own directory rather than sharing one general purpose `var/` catch-all. Both the filename and its location are fully controlled by this one setting; point it anywhere a deployment prefers. This file does not exist until something actually writes it, and RouterCLI treats a missing file the same as an empty one rather than an error.
+
+RouterCLI also replays this file back in automatically, once, every time the process starts, before a session can even log in, the same way a real device applies its own saved configuration at boot before anyone can reach a prompt. This runs with no password prompting of its own, even for a Command Level that normally requires one: the trust here is not a credential typed at a terminal, since nobody has had the chance to type one yet, it is this process itself already having been allowed to run, and to read this file, by the operating system. Nothing recorded inside the file's own text, a `password manager hash <hash>` line included, is ever treated as proof of anything on its own; see `command.AppContext.ReplayingStartupConfig`'s own doc comment in `command/model.go`, and `loadStartupConfig` in `main.go`, for the full mechanism. A malformed or incompatible saved file, one naming a command that no longer exists for instance, fails the whole process at startup with a clear error rather than starting up in a silently, partially applied state.
 
 #### `AlphabeticalCommandOrder`
 
@@ -144,7 +166,7 @@ These properties define the same things as the three login properties above, but
 
 #### `TOTPIssuer`
 
-This property defines the "issuer" name that is shown in a user's authenticator app next to their account name. The default is `RouterCLI`. This is purely a cosmetic value, but is shown by every mainstream app, so it is worth setting to your organization's real name for production use. Used both when enrolling a user through `./routercli --mfa <username>` and when a logged in user runs `totp enable` from inside the running CLI.
+This property defines the "issuer" name that is shown in a user's authenticator app next to their account name. The default is `RouterCLI`. This is purely a cosmetic value, but is shown by every mainstream app, so it is worth setting to your organization's real name for production use. Used whenever a logged in user runs `totp enable` or `totp enable qr` from inside the running CLI, the only way to enroll in TOTP.
 
 #### `TOTPMaxAttempts`
 
@@ -206,4 +228,4 @@ This is a required property and contains the bcrypt hash of a user's password as
 
 #### `totp_secret`
 
-An optional base32-encoded TOTP secret. When set, this user must also provide a valid six-digit code from their authenticator app to log in. This is checked right after the password verifies. Empty means no second factor is required for this user. Generate one with `./routercli --mfa <username>`.
+An optional base32-encoded TOTP secret. When set, this user must also provide a valid six-digit code from their authenticator app to log in. This is checked right after the password verifies. Empty means no second factor is required for this user. This is never set by hand; a user with no `totp_secret` set yet logs in with a password alone, then sets it themselves by running `totp enable` or `totp enable qr` from inside the running CLI.

@@ -13,6 +13,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -73,6 +75,97 @@ func sendLine(t *testing.T, w io.Writer, s string) {
 	if _, err := fmt.Fprintln(w, s); err != nil {
 		t.Fatalf("failed to write %q to pty master: %v", s, err)
 	}
+}
+
+// ----------------------------------------------------------------------
+//
+// watchTerminalResize
+//
+// ----------------------------------------------------------------------
+
+// syncLogBuffer - This type collects everything written to it into an
+// ordinary bytes.Buffer, guarded by a mutex, mirroring
+// paging/pager_test.go's own syncBuffer helper in the sibling package.
+// TestWatchTerminalResizeLogsOnRealSIGWINCH needs one, rather than a
+// plain bytes.Buffer, since watchTerminalResize's own background
+// goroutine writes to it, through ctx.Logger.Debugln, concurrently
+// with this test's own goroutine polling String() to see what has
+// arrived so far; a plain bytes.Buffer is not safe for that, as this
+// project's own "go test -race" pass caught during Phase 29's own
+// development.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestWatchTerminalResizeLogsOnRealSIGWINCH - This test verifies that
+// watchTerminalResize's background goroutine actually reacts to a
+// real SIGWINCH, not merely to a call it makes to itself, and reports
+// the pty's own new size, matching this same test file's own
+// technique of driving real, low level terminal behavior directly
+// rather than only unit testing around it, see this file's own doc
+// comment. The signal itself is sent with syscall.Kill(self, ...),
+// the same direct-to-process-self technique
+// TestPreventEscapeIgnoresEscapeSignals in main_test.go already uses,
+// rather than relying on the kernel's own foreground process group
+// delivery for a resized pty, since this test process is not
+// necessarily that pty's controlling terminal's foreground process
+// group at all.
+func TestWatchTerminalResizeLogsOnRealSIGWINCH(t *testing.T) {
+	master, slave := newPTY(t)
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Fatalf("failed to set the pty's own initial size: %v", err)
+	}
+
+	buf := &syncLogBuffer{}
+	logger := log.New(buf, "", 0)
+	logger.EnableLevel("debug")
+	ctx := &command.AppContext{Logger: logger}
+
+	stop := watchTerminalResize(ctx, int(slave.Fd()))
+	defer stop()
+
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 40, Cols: 132}); err != nil {
+		t.Fatalf("failed to resize the pty: %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("failed to send SIGWINCH to self: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(buf.String(), "132") {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := buf.String(); !strings.Contains(got, "132") || !strings.Contains(got, "40") {
+		t.Errorf("log output = %q, want it to mention the resized 132 columns by 40 lines", got)
+	}
+}
+
+// TestWatchTerminalResizeStopIsSafeToCallOnce - This test verifies
+// only that stop, watchTerminalResize's own return value, can be
+// called without hanging or panicking; the background goroutine
+// leaking past a test, or a double close on its done channel, would
+// otherwise be easy mistakes for a future change to this function to
+// reintroduce silently, with no test noticing until a much later,
+// unrelated symptom.
+func TestWatchTerminalResizeStopIsSafeToCallOnce(t *testing.T) {
+	_, slave := newPTY(t)
+	ctx := &command.AppContext{Logger: log.New(io.Discard, "", 0)}
+
+	stop := watchTerminalResize(ctx, int(slave.Fd()))
+	stop()
 }
 
 // discardAuditLogger - This function returns a *log.Logger that

@@ -70,6 +70,7 @@ func TestLoadSystemConfigValid(t *testing.T) {
 		ElevationTimeout:   Duration(30 * time.Second),
 		TreeStructure:      "custom-tree-structure.yaml",
 		CommonTreeFile:     "custom-common.yaml",
+		StartupConfigFile:  "var/startup-config/startup-config",
 		AuthRequired:       true,
 		UsersFile:          "custom-users.yaml",
 		LoginMaxAttempts:   5,
@@ -89,8 +90,11 @@ func TestLoadSystemConfigValid(t *testing.T) {
 
 		PagingEnabled:       true,
 		DefaultPageLines:    24,
+		DefaultHistorySize:  500,
 		FilterMatchMode:     "substring",
 		MaxFilterChainDepth: 2,
+
+		SuConfigTrustWindow: Duration(5 * time.Minute),
 	}
 
 	if !systemConfigsEqual(cfg, want) {
@@ -599,12 +603,20 @@ func TestDefaultSystemConfigValues(t *testing.T) {
 		t.Errorf("ElevationTimeout default = %v, want 0", cfg.ElevationTimeout)
 	}
 
+	if cfg.SuConfigTrustWindow != Duration(5*time.Minute) {
+		t.Errorf("SuConfigTrustWindow default = %v, want 5m", cfg.SuConfigTrustWindow)
+	}
+
 	if cfg.TreeStructure != "var/tree/tree_structure.yaml" {
 		t.Errorf("TreeStructure default = %q, want %q", cfg.TreeStructure, "var/tree/tree_structure.yaml")
 	}
 
 	if cfg.CommonTreeFile != "var/tree/level_common.yaml" {
 		t.Errorf("CommonTreeFile default = %q, want %q", cfg.CommonTreeFile, "var/tree/level_common.yaml")
+	}
+
+	if cfg.StartupConfigFile != "var/startup-config/startup-config" {
+		t.Errorf("StartupConfigFile default = %q, want %q", cfg.StartupConfigFile, "var/startup-config/startup-config")
 	}
 
 	if cfg.AuthRequired {
@@ -683,6 +695,10 @@ func TestDefaultSystemConfigValues(t *testing.T) {
 		t.Errorf("DefaultPageLines default = %d, want 24", cfg.DefaultPageLines)
 	}
 
+	if cfg.DefaultHistorySize != 500 {
+		t.Errorf("DefaultHistorySize default = %d, want 500", cfg.DefaultHistorySize)
+	}
+
 	if cfg.FilterMatchMode != "substring" {
 		t.Errorf("FilterMatchMode default = %q, want %q", cfg.FilterMatchMode, "substring")
 	}
@@ -704,7 +720,8 @@ func TestDefaultSystemConfigIsValid(t *testing.T) {
 // TestSystemConfigValidate - This test table drives validate across LogLevel,
 // LoginMaxAttempts, TOTPMaxAttempts, PasswordMinLength,
 // PasswordChangeMaxAttempts, SessionIdleTimeout, ElevationTimeout,
-// DefaultPageLines, FilterMatchMode, and MaxFilterChainDepth, covering
+// ReauthGracePeriod, SuConfigTrustWindow, DefaultPageLines,
+// DefaultHistorySize, FilterMatchMode, and MaxFilterChainDepth, covering
 // the boundary between an accepted value and a rejected one for each
 // field.
 func TestSystemConfigValidate(t *testing.T) {
@@ -889,6 +906,48 @@ func TestSystemConfigValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "valid zero reauth grace period",
+			mutate: func(c *SystemConfig) {
+				c.ReauthGracePeriod = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid positive reauth grace period",
+			mutate: func(c *SystemConfig) {
+				c.ReauthGracePeriod = Duration(time.Minute)
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative reauth grace period",
+			mutate: func(c *SystemConfig) {
+				c.ReauthGracePeriod = Duration(-time.Second)
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid zero su-config trust window",
+			mutate: func(c *SystemConfig) {
+				c.SuConfigTrustWindow = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid positive su-config trust window",
+			mutate: func(c *SystemConfig) {
+				c.SuConfigTrustWindow = Duration(5 * time.Minute)
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative su-config trust window",
+			mutate: func(c *SystemConfig) {
+				c.SuConfigTrustWindow = Duration(-time.Second)
+			},
+			wantErr: true,
+		},
+		{
 			name: "AuthRequired with neither host nor CLI authentication enabled",
 			mutate: func(c *SystemConfig) {
 				c.AuthRequired = true
@@ -1014,6 +1073,27 @@ func TestSystemConfigValidate(t *testing.T) {
 			name: "negative default page lines",
 			mutate: func(c *SystemConfig) {
 				c.DefaultPageLines = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid default history size zero",
+			mutate: func(c *SystemConfig) {
+				c.DefaultHistorySize = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid default history size five hundred",
+			mutate: func(c *SystemConfig) {
+				c.DefaultHistorySize = 500
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative default history size",
+			mutate: func(c *SystemConfig) {
+				c.DefaultHistorySize = -1
 			},
 			wantErr: true,
 		},
@@ -1303,23 +1383,25 @@ func TestDurationYAMLRoundTrip(t *testing.T) {
 // literal "#" that could otherwise be misread as a YAML comment.
 func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 	in := SystemConfig{
-		PreventEscape:      true,
-		LogLevel:           3,
-		HistoryFile:        "/tmp/hist",
-		AuditLogFile:       "/tmp/audit.log",
-		AuditLogEnabled:    true,
-		CurrentLanguage:    "fr",
-		DefaultLanguage:    "en",
-		LanguageDir:        "custom-lang",
-		SessionIdleTimeout: Duration(10 * time.Minute),
-		ElevationTimeout:   Duration(30 * time.Second),
-		TreeStructure:      "custom-tree-structure.yaml",
-		CommonTreeFile:     "custom-common.yaml",
-		AuthRequired:       true,
-		UsersFile:          "custom-users.yaml",
-		LoginMaxAttempts:   5,
-		TOTPIssuer:         "My # Company",
-		TOTPMaxAttempts:    4,
+		PreventEscape:       true,
+		LogLevel:            3,
+		HistoryFile:         "/tmp/hist",
+		AuditLogFile:        "/tmp/audit.log",
+		AuditLogEnabled:     true,
+		CurrentLanguage:     "fr",
+		DefaultLanguage:     "en",
+		LanguageDir:         "custom-lang",
+		SessionIdleTimeout:  Duration(10 * time.Minute),
+		ElevationTimeout:    Duration(30 * time.Second),
+		ReauthGracePeriod:   Duration(45 * time.Second),
+		SuConfigTrustWindow: Duration(2 * time.Minute),
+		TreeStructure:       "custom-tree-structure.yaml",
+		CommonTreeFile:      "custom-common.yaml",
+		AuthRequired:        true,
+		UsersFile:           "custom-users.yaml",
+		LoginMaxAttempts:    5,
+		TOTPIssuer:          "My # Company",
+		TOTPMaxAttempts:     4,
 
 		PasswordMinLength:           14,
 		PasswordRequireUppercase:    true,
@@ -1338,6 +1420,7 @@ func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 
 		PagingEnabled:       false,
 		DefaultPageLines:    40,
+		DefaultHistorySize:  1000,
 		FilterMatchMode:     "regex",
 		MaxFilterChainDepth: 5,
 	}

@@ -54,3 +54,23 @@ trees:
     # account, multi-factor enrollment and a password change alike,
     # only requires being logged in, see cmd/core/cmd_user.go, not the
     # separate, unrelated privilege step "enable" gates.
+
+  su-config:
+    tree_file: var/tree/level_su_config.yaml
+    parent: exec
+    inherit_parent: false
+    prompt_suffix: "(su-config)"
+    enter_command: su-config
+    exit_command: exit-su-config
+    # No password_hash and no vendor_defined_password_hash: open by
+    # default, left to an implementer or RBAC to lock down, see
+    # var/tree/README.md's own su-config section for why this
+    # framework does not force a password here. grants_replay_trust
+    # is what actually matters: a real, live credential check
+    # succeeding here, whether or not a password was ever configured,
+    # is what SuConfigTrustWindow, in etc/routercli.yaml, measures
+    # from. reveal_vendor_defined_secrets is what lets "show
+    # running-config" show a real vendor defined hash here instead of
+    # the "<HIDDEN>" placeholder it shows everywhere else.
+    grants_replay_trust: true
+    reveal_vendor_defined_secrets: true

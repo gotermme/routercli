@@ -444,21 +444,18 @@ optional. See `etc/README.md` for the full field list
 (`Login*`, `CommandLevel*`, and `CommandPassword*`, nine fields in total) and
 exactly how the window and lockout pair validation works.
 
-**Two-factor login (TOTP / Google Authenticator)** is opt-in per user.
-Enroll someone:
-
-```sh
-./routercli --mfa alice
-```
-
-This shows a QR code and the plain text secret, for apps or situations where
-scanning is not convenient. Either works with Google Authenticator, Authy,
-1Password, or any standard TOTP app. It then asks you to type the code your app
-is showing right now, to confirm the secret actually works, before printing the
-`totp_secret:` line to add to that user's entry in `etc/users.yaml`. A user
-with no `totp_secret` set is never prompted for a code at all, so this does not
-change the login flow for anyone who has not been enrolled. As of right now this
-is all manually enabled.
+**Two-factor login (TOTP / Google Authenticator)** is opt-in per user, and
+enrollment is entirely self service, from inside a running session. A user
+with no `totp_secret` set yet in `etc/users.yaml` logs in with a password
+alone, then runs `user` followed by `totp enable` (or `totp enable qr` for a
+scannable QR code alongside the plain text secret), reachable directly after
+login with no need to run `enable` first. Either works with Google
+Authenticator, Authy, 1Password, or any standard TOTP app. It then asks for
+the code the app is showing right now, to confirm the secret actually
+works, before saving `totp_secret` into that same user's entry in
+`etc/users.yaml`. A user with no `totp_secret` set is never prompted for a
+code at all, so this does not change the login flow for anyone who has not
+enrolled.
 
 Authentication in this project lives entirely in `auth/`, with password hashing,
 the TOTP implementation, and the login flow all in one place, specifically so a
@@ -566,10 +563,13 @@ immediately. `terminal length <0-512>` sets how many lines a session shows
 before pausing, for the rest of that session; `terminal length 0` disables
 pausing entirely, the real Cisco convention for "never pause." With no
 `terminal length` ever typed, the real terminal's own detected height is
-used instead. `terminal width <0-512>` is reported back the same way but
-otherwise has no effect within RouterCLI itself. `PagingEnabled: false` in
-`etc/routercli.yaml` turns pausing off deployment-wide, without affecting
-filtering at all.
+used instead, read fresh every time a Pageable command runs, so a session
+resized mid-run is honored immediately, with no staleness to correct.
+`terminal width <0-512>` works the same way for width, though otherwise
+has no effect within RouterCLI itself beyond what `show terminal` reports
+back, see item 12 below for more on how, and how little, a terminal
+resize matters here. `PagingEnabled: false` in `etc/routercli.yaml` turns
+pausing off deployment-wide, without affecting filtering at all.
 
 `terminal length` and `terminal width` are session-only values, exactly
 matching real Cisco and HP behavior: neither ever appears in
@@ -579,12 +579,76 @@ values instead, the one place they are surfaced back:
 
 ```
 router# show terminal
-Length: 24 lines, Width: 0 columns
+Length: 24 lines, Width: 80 columns
 Paging: enabled (session), enabled (global)
 Filter mode: substring
 ```
 
-## 10. Testing
+### 10. Login and exec banners
+
+```
+router(config)# banner motd "Authorized users only"
+router(config)# banner login "Enter your credentials below"
+```
+
+`banner motd` and `banner login` match Cisco's own two commands of the
+same names. Both are shown before authentication, `banner motd` first,
+matching real Cisco's own ordering: a message of the day banner is about
+the connection itself, shown to every connection regardless of whether a
+login prompt follows at all, while a login banner is shown only
+immediately before a real username prompt actually runs, skipped entirely
+when `AuthRequired: false` or `EnableCLIAuthentication: false` in
+`etc/routercli.yaml` mean no such prompt ever appears. `no banner motd`
+and `no banner login` clear whichever one is named. Both persist to
+`startup-config` the same way `hostname` does, see
+`cmd/product/cmd_banner.go`.
+
+### 11. Command history and `show history`
+
+```
+router(config)# terminal history size 200
+router# show history
+```
+
+`HistoryFile` in `etc/routercli.yaml`, `var/log/history.log` by default,
+is a genuine, persistent, cross-session log, not the small, in memory
+ring buffer a real Cisco or HP device keeps; every command a session
+submits is appended to it immediately, and nothing RouterCLI itself does
+ever truncates or clears it. `show history` reads this same file back and
+prints its most recent `DefaultHistorySize` lines, `500` by default,
+matching the underlying `chzyer/readline` library's own built in
+default. `terminal history size <0-1000>`, wider than Cisco's own
+`<0-256>` range on purpose, room enough for `DefaultHistorySize`'s own
+default, changes how many lines `show history` shows for the rest of
+that session.
+
+This does not also change how many past commands the session's own Up
+and Down arrow recall remembers. That limit is fixed once, from
+`DefaultHistorySize`, when a session starts, and never changes
+afterward. The underlying readline library reads its own copy of that
+limit from a background goroutine that runs for the entire life of a
+session, so reassigning it later, once discovered during this project's
+own `go test -race` verification, is a genuine data race, not a
+theoretical one; see `command.AppContext.HistorySize`'s own doc comment
+in `command/model.go` for the full reasoning.
+
+### 12. Terminal resize awareness
+
+RouterCLI reacts to a real terminal resize, `SIGWINCH`, the signal a
+terminal emulator sends on every resize, logging one `Debugln` entry each
+time it happens, `terminal resized, now <width> columns by <height>
+lines`. This exists purely for observability, a line a deployment can
+grep for, not for correctness: nothing in this project caches a stale
+terminal size anywhere to begin with. `paging.EffectivePageLines` and
+`paging.EffectiveTerminalWidth` both read the real terminal's current
+size fresh on every single call already, so `show terminal`, and every
+Pageable command's own pager, already reflect a resize the next time
+either is consulted, with no `SIGWINCH` handling required for
+correctness at all. `watchTerminalResize` in `main.go` is the one call
+site, started once at session start and stopped, through its own
+returned `stop` function, before the process exits.
+
+## 13. Testing
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -606,7 +670,7 @@ editing it, run `./routercli --check-config`. It loads and verifies the Tree
 Structure without starting the interactive loop, and is worth running as part
 of the same routine.
 
-## 11. Code execution logic
+## 14. Code execution logic
 
 1. `main.go` runs.
 2. Every `init()` in `cmd/core` and `cmd/product` runs. This happens

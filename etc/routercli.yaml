@@ -4,6 +4,16 @@
 TreeStructure: var/tree/tree_structure.yaml
 
 
+# --- Startup Configuration ---
+# The file su-config's "copy running-config startup-config" and "erase
+# startup-config" read and write. RouterCLI replays it back in automatically
+# at every process start, before a session can even log in, restoring
+# hostname, interfaces, and every Command Level's own saved password
+# exactly as they were saved. See StartupConfigFile in etc/README.md for
+# the full explanation.
+StartupConfigFile: var/startup-config/startup-config
+
+
 # --- System, History, and Audit Logs ---
 LogLevel: 1
 LogFile: var/log/system.log
@@ -31,6 +41,21 @@ LanguageDir: var/lang
 # Automatically demotes an elevated session back to unprivileged after this
 # long, regardless of activity elsewhere.
 # ElevationTimeout: 5m
+#
+# A sudo style grace window. A session that reenters a password protected
+# Command Level within this long of last actually typing that level's
+# password is waved through without being prompted again. See
+# ReauthGracePeriod in etc/README.md for the full explanation, including
+# why this must never be relied on to replay a whole saved configuration.
+# ReauthGracePeriod: 1m
+#
+# How long a real, live password check at su-config is trusted broadly
+# enough to also waive every other Command Level's own password check,
+# letting a whole saved configuration paste back in without a prompt at
+# every gated level along the way. Unlike the other timeouts on this page,
+# this one is NOT disabled by default; see SuConfigTrustWindow in
+# etc/README.md for the full explanation.
+SuConfigTrustWindow: 5m
 
 
 # --- Authentication ---
@@ -91,9 +116,9 @@ CLIAuthProvider: local
 
 # TOTPIssuer is shown in a user's authenticator app next to their
 # account name. It is cosmetic, but every mainstream app displays it.
-# Used both by `routercli --mfa <username>` and by the in-session
-# `totp enable` command. Per-user TOTP is opt-in, so only users with a
-# totp_secret set in UsersFile are ever prompted for a code.
+# Used by the in-session `totp enable` command, the only way to
+# enroll. Per-user TOTP is opt-in, so only users with a totp_secret
+# set in UsersFile are ever prompted for a code.
 TOTPIssuer: RouterCLI
 #
 # TOTPMaxAttempts is how many times in a row a session may retype a
@@ -162,6 +187,14 @@ PagingEnabled: true
 # detected, that real height is used instead, see
 # paging.EffectivePageLines.
 DefaultPageLines: 24
+#
+# DefaultHistorySize fixes how many past commands a session's own Up
+# and Down arrow recall remembers, for the whole life of that session,
+# and sets how many lines "show history" shows until a session types
+# "terminal history size <n>" itself, which affects "show history"
+# alone. 500 matches the underlying readline library's own built-in
+# default.
+DefaultHistorySize: 500
 #
 # FilterMatchMode chooses how "| include", "| exclude", and "| begin"
 # match their pattern against each line of output. "substring" is a

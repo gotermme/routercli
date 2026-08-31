@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,7 +35,6 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/gologme/log"
 	"github.com/pborman/getopt/v2"
-	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/term"
 )
 
@@ -163,10 +163,11 @@ func main() {
 	// since "password manager", cmd/core/cmd_password_manager.go, can
 	// set one at any time while the program is running, and the
 	// limiter needs to already be there, ready, the moment that
-	// happens. Per-command limiters are narrower, only commands that
-	// already have a PasswordHash at load time get one, since, unlike
-	// a Command Level's secret, nothing in this project currently sets
-	// Command.PasswordHash after the tree is loaded.
+	// happens. Per-command limiters are narrower, only commands whose
+	// EffectivePasswordHash is non-empty at load time get one, since,
+	// unlike a Command Level's secret, nothing in this project
+	// currently sets Command.PasswordHash or
+	// Command.VendorDefinedPasswordHash after the tree is loaded.
 	for _, level := range levels.Order {
 		level.RateLimiter = auth.NewRateLimiter(config.CommandLevelMaxAttempts, config.CommandLevelAttemptWindow.AsDuration(), config.CommandLevelLockoutDuration.AsDuration())
 	}
@@ -189,7 +190,14 @@ func main() {
 		}
 		os.Exit(1)
 	}
+	if problems := command.VerifyVendorDefinedSecrets(levels); len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(os.Stderr, "%", p)
+		}
+		os.Exit(1)
+	}
 	warnPlaintextLevelSecrets(logger, levels)
+	warnPlaintextCommandSecrets(logger, levels)
 	if checkConfig {
 		fmt.Println("configuration OK -", len(levels.Order), "Command Levels verified")
 		os.Exit(0)
@@ -263,6 +271,69 @@ func main() {
 		PagingEnabled:       config.PagingEnabled,
 		FilterMode:          filterModeFromConfig(config.FilterMatchMode),
 		MaxFilterChainDepth: config.MaxFilterChainDepth,
+		// DefaultHistorySize is copied straight from config here as
+		// well, the same treatment as DefaultPageLines just above.
+		// HistorySize itself starts nil, unset, matching PageLines and
+		// TerminalWidth, until "terminal history size" is typed.
+		// HistoryFile is set further down, once histFile below has
+		// resolved config.HistoryFile's own possibly empty value to
+		// its real, final path.
+		DefaultHistorySize: config.DefaultHistorySize,
+		// ReauthGracePeriod and SuConfigTrustWindow are copied straight
+		// from config here as well, the same as DefaultPageLines and
+		// the rest above, so command.EnterCommandLevel can read them
+		// directly off ctx rather than package command needing any
+		// dependency on package config. See
+		// CommandLevel.LastAuthenticatedAt, CommandLevel.GrantsReplayTrust,
+		// and AppContext.ReauthGracePeriod / SuConfigTrustWindow's own
+		// doc comments in command/model.go for what each actually
+		// controls.
+		ReauthGracePeriod:   config.ReauthGracePeriod.AsDuration(),
+		SuConfigTrustWindow: config.SuConfigTrustWindow.AsDuration(),
+		// StartupConfigFile is threaded through unconditionally, unlike
+		// UsersFile below, since it has a real default regardless of
+		// AuthRequired, see config.DefaultSystemConfig.
+		StartupConfigFile: config.StartupConfigFile,
+	}
+
+	// StartupConfigFile's own directory is created unconditionally,
+	// the same treatment histFile's directory gets further down,
+	// regardless of whether a startup-config has ever actually been
+	// saved yet, since StartupConfigFile always has a real default,
+	// see the field's own assignment right above. This is not
+	// strictly required for loadStartupConfig below, a missing file
+	// is not an error either way, but it means the directory a first
+	// "copy running-config startup-config" needs is already there
+	// from the very first run, rather than only appearing the moment
+	// something is actually saved.
+	if err := mkdirForFile(ctx.StartupConfigFile); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to prepare startup-config directory:", err)
+		os.Exit(1)
+	}
+
+	// loadStartupConfig runs before establishSession, and before
+	// anything below constructs the real, interactive readline loop,
+	// so a saved startup-config is applied to ctx.State the same way
+	// a real device applies its own saved configuration before
+	// anyone can log in at all, not gated behind who is about to
+	// connect. See loadStartupConfig's own doc comment for the full
+	// reasoning, including why this is safe to trust with no
+	// password prompting of its own.
+	if err := loadStartupConfig(ctx, ctx.StartupConfigFile); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to load startup-config:", err)
+		os.Exit(1)
+	}
+
+	// BannerMOTD, "message of the day," is shown unconditionally here,
+	// to every connection, right after loadStartupConfig above has
+	// replayed any saved "banner motd" line back into ctx.State, and
+	// before establishSession's own login prompt, if any, runs below.
+	// This matches real Cisco and HP, where a MOTD banner is about the
+	// connection itself, shown regardless of whether a login prompt
+	// follows at all. See cmd/product/cmd_banner.go and
+	// ProductState.BannerMOTD's own doc comment.
+	if state, ok := ctx.State.(*product.ProductState); ok {
+		printBanner(state.BannerMOTD)
 	}
 
 	if config.AuthRequired {
@@ -303,6 +374,19 @@ func main() {
 			ctx.AuthProvider = provider
 		}
 
+		// BannerLogin is shown immediately before this call only when
+		// EnableCLIAuthentication is actually on, since that is the
+		// one condition under which establishSession below actually
+		// runs a real, interactive username prompt at all,
+		// auth.PromptLogin inside establishSession. A deployment
+		// running EnableHostAuthentication alone never shows a login
+		// prompt, so a login banner would have nothing to introduce.
+		if config.EnableCLIAuthentication {
+			if state, ok := ctx.State.(*product.ProductState); ok {
+				printBanner(state.BannerLogin)
+			}
+		}
+
 		session, err := establishSession(config, users, ctx.AuthProvider, translator, audit, os.Stdin, os.Stdout)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\n%", translator.T("auth.access_denied"))
@@ -339,6 +423,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "failed to prepare history file directory:", err)
 		os.Exit(1)
 	}
+	// ctx.HistoryFile is set to this same, fully resolved path, so
+	// "show history" in cmd/core/cmd_show.go reads the exact file
+	// readline itself is about to open and append every submitted
+	// line to, rather than rereading config.HistoryFile's own
+	// possibly empty value and reimplementing historyFilePath's
+	// fallback a second time.
+	ctx.HistoryFile = histFile
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          buildPrompt(ctx),
@@ -346,6 +437,28 @@ func main() {
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
 		HistoryFile:     histFile,
+		// Seeded from config here, once, at construction, so a
+		// deployment that sets DefaultHistorySize away from
+		// readline's own built-in 500 default gets that size from the
+		// very first line read. This is deliberately never reassigned
+		// again later, unlike ctx's own other session overrides such
+		// as PageLines: readline.Config's own HistoryLimit is read,
+		// unsynchronized, by an internal background goroutine this
+		// same NewEx call starts, github.com/chzyer/readline's own
+		// Operation.ioloop, for the entire life of this Instance, so
+		// mutating it from outside after construction is a genuine
+		// data race, not merely a theoretical one, caught by this
+		// project's own "go test -race" pass during Phase 29's own
+		// development. "terminal history size <n>",
+		// cmd/core/cmd_history.go, therefore governs only
+		// command.EffectiveHistorySize's other consumer, "show
+		// history"'s own display cap, see cmd/core/cmd_show.go's
+		// historyLines; it has no live effect on this session's own
+		// Up and Down arrow recall, which stays fixed at whatever
+		// this one value was when this session started. See
+		// command.AppContext.HistorySize's own doc comment for the
+		// full reasoning.
+		HistoryLimit: config.DefaultHistorySize,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to start readline:", err)
@@ -365,6 +478,9 @@ func main() {
 	// since there is nothing to restore in that case anyway.
 	termFD := int(os.Stdin.Fd())
 	origTermState, _ := term.GetState(termFD)
+
+	stopResizeWatch := watchTerminalResize(ctx, termFD)
+	defer stopResizeWatch()
 
 	runLoop(rl, treeListener, ctx, runLoopOptions{
 		PreventEscape:      config.PreventEscape,
@@ -541,6 +657,80 @@ func buildPrompt(ctx *command.AppContext) string {
 	}
 
 	return host + frame.PromptSuffix + marker
+}
+
+// printBanner - This function prints text, either
+// ProductState.BannerMOTD or ProductState.BannerLogin, cmd/product/model.go,
+// to stdout as is, with no added formatting beyond its own trailing
+// newline. It does nothing at all when text is empty, the default,
+// unset state every banner starts in, and neither of its two call
+// sites in main need their own separate empty check because of it.
+// This is deliberately product package aware, the same established
+// precedent buildPrompt already sets just above for reading Hostname
+// back out of ctx.State, rather than adding a banner concept to the
+// framework level AppContext itself; see BannerMOTD and BannerLogin's
+// own doc comments in cmd/product/model.go for why they live on
+// ProductState instead.
+func printBanner(text string) {
+	if text == "" {
+		return
+	}
+	fmt.Println(text)
+}
+
+// watchTerminalResize - This function starts a background goroutine
+// that logs, at Debugln level, every time the real terminal behind fd
+// is resized for as long as this session runs, os/signal.Notify on
+// syscall.SIGWINCH, the same signal a real terminal emulator sends a
+// foreground process on every resize. It returns a stop function; the
+// one real call site in main defers a call to it immediately, so the
+// goroutine, and the signal notification registration behind it, are
+// both cleaned up before the process actually exits, rather than
+// leaking for the life of the process the way an unregistered
+// background goroutine and a still-armed signal.Notify channel both
+// would otherwise.
+//
+// This exists purely for observability, a Debugln entry a deployment
+// can grep for, not for correctness. Nothing in this project caches a
+// stale terminal size anywhere to begin with: paging.EffectivePageLines
+// and paging.EffectiveTerminalWidth both call term.GetSize fresh on
+// every single call already, see their own doc comments, so "show
+// terminal", and every Pageable command's own pager, already reflect
+// a resize the next time either is consulted, with no SIGWINCH
+// handling required for correctness at all. This genuinely narrows
+// the Framework Gap Roadmap's own original framing of this gap, "a
+// value set once at login"; that framing did not survive Phase 25's
+// own paging work, which had already closed it before this phase ever
+// began, see paging.EffectivePageLines's own doc comment.
+//
+// A resized size that fails to read, term.GetSize returning an error,
+// is silently skipped rather than logged as zero by zero, the same
+// "nothing meaningful to report" treatment every other caller of
+// term.GetSize in this project already gives that case.
+func watchTerminalResize(ctx *command.AppContext, fd int) (stop func()) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-sigCh:
+				w, h, err := term.GetSize(fd)
+				if err != nil {
+					continue
+				}
+				ctx.Logger.Debugln("DEBUG: terminal resized, now", w, "columns by", h, "lines")
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
 }
 
 // runLoop - This function is the actual read, resolve, validate, and
@@ -810,7 +1000,7 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			// session settles into. See Command.PasswordHash's doc
 			// comment for how this differs from
 			// CommandLevel.PasswordHash.
-			if res.Command.PasswordHash != "" {
+			if effectiveHash := res.Command.EffectivePasswordHash(); effectiveHash != "" {
 				// Checked before ever prompting, the same reasoning as
 				// command.EnterCommandLevel's own rate limit check: a
 				// locked out session should not be invited to try
@@ -821,7 +1011,7 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 					continue
 				}
 				password, perr := auth.PromptSecret(os.Stdout, int(os.Stdin.Fd()), ctx.Translator)
-				if perr != nil || !auth.VerifyPassword(res.Command.PasswordHash, password) {
+				if perr != nil || !auth.VerifyPassword(effectiveHash, password) {
 					res.Command.PasswordRateLimiter.RecordFailure()
 					fmt.Println("%", ctx.Translator.T("commandlevel.access_denied"))
 					ctx.Audit.Log(username, line, false)
@@ -947,76 +1137,6 @@ func runHashPasswordUtility(stdin *os.File) {
 	fmt.Println(hash)
 }
 
-// runTOTPSetupUtility - This function implements the --mfa flag,
-// which enrolls a user for TOTP. It generates a fresh secret and
-// shows it both as a scannable QR code, an otpauth:// URI rendered
-// directly in the terminal with no image file and no GUI needed, and
-// as plain text for manual entry, since not every authenticator app
-// workflow makes scanning convenient and some users will always
-// prefer typing a secret over pointing a camera at a screen.
-//
-// This does not stop at just showing the secret. It then prompts for
-// a live code and verifies it before printing the users.yaml line to
-// add. Enrollment that looks like it worked but has a misspelled or
-// misread secret is a real, common failure mode for TOTP setup in
-// practice. Confirming with a real code from the app catches that
-// immediately, while the terminal is still open, instead of leaving
-// an administrator to discover it days later when the user actually
-// tries to log in.
-//
-// stdin is taken as an explicit parameter, rather than this function
-// reading the process-wide os.Stdin itself, so a test can supply the
-// confirmation code through an ordinary io.Reader. Unlike
-// establishSession and runHashPasswordUtility, this one reads its
-// confirmation code with plain, echoed input, see the reader.ReadString
-// call below, not through term.ReadPassword, so no real terminal
-// device is actually required here, an in-memory strings.Reader is
-// enough.
-func runTOTPSetupUtility(configPath, username string, stdin io.Reader) {
-	config, err := config.LoadSystemConfig(configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "failed to load configuration:", err)
-		os.Exit(1)
-	}
-
-	secret, err := auth.GenerateTOTPSecret()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error generating TOTP secret:", err)
-		os.Exit(1)
-	}
-
-	uri := auth.TOTPProvisioningURI(config.TOTPIssuer, username, secret)
-	qr, err := qrcode.New(uri, qrcode.Medium)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error generating QR code:", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("TOTP enrollment for %q (issuer %q)\n\n", username, config.TOTPIssuer)
-	fmt.Println("Scan this QR code with your authenticator app:")
-	fmt.Println()
-	fmt.Println(qr.ToSmallString(false))
-	fmt.Println("...or, if you cannot scan it, enter this secret manually:")
-	fmt.Println()
-	fmt.Println("  " + auth.FormatTOTPSecretForDisplay(secret))
-	fmt.Println()
-	fmt.Print("Now enter the 6-digit code your app is showing, to confirm: ")
-
-	reader := bufio.NewReader(stdin)
-	codeLine, _ := reader.ReadString('\n')
-	code := strings.TrimSpace(codeLine)
-
-	if !auth.VerifyTOTPCode(secret, code, time.Now()) {
-		fmt.Fprintln(os.Stderr, "\nThat code did not verify - the secret was NOT confirmed working.")
-		fmt.Fprintln(os.Stderr, "Nothing has been saved. Run --mfa again and try scanning/typing more carefully.")
-		os.Exit(1)
-	}
-
-	fmt.Println()
-	fmt.Printf("Confirmed. Add this line to %q's entry in %s:\n\n", username, config.UsersFile)
-	fmt.Printf("  totp_secret: %q\n", secret)
-}
-
 // historyFilePath - This function returns a per-user history file
 // path rather than a hardcoded one. It is used as the fallback when
 // the configuration file does not set HistoryFile explicitly. It is
@@ -1043,9 +1163,88 @@ func mkdirForFile(path string) error {
 	return os.MkdirAll(dir, 0750)
 }
 
+// loadStartupConfig reads path, AppContext.StartupConfigFile, and, if
+// it exists, replays its own text back into ctx.State the same way a
+// live session pasting that exact text back in would, through
+// command.ReplayLines, before establishSession or the interactive
+// readline loop below ever runs. A path that does not exist yet is
+// not an error, the same "no startup-config saved yet" treatment
+// show.startup-config's own handler in cmd/product already gives it;
+// a brand new deployment simply has nothing to load.
+//
+// This is what closes Framework Gap Roadmap item 1's last remaining
+// open piece, see claude/PROGRESS.md's own Phase 27 closing
+// paragraphs: a saved startup-config now really is applied again
+// after a process restart, not only ever a file sitting on disk
+// waiting for something to read it by hand.
+//
+// trusted is always passed as true to ReplayLines here: nothing has
+// typed a password yet, no Session even exists at the point main()
+// calls this function, well before establishSession runs. See
+// AppContext.ReplayingStartupConfig's own doc comment in
+// command/model.go for the full reasoning on why that is still safe
+// rather than a shortcut around any of this project's own pass the
+// hash reasoning; the trust here comes from this process already
+// having been allowed to run, and to read this file, by the
+// operating system itself, never from anything the file's own text
+// says.
+//
+// The whole replay runs inside paging.CaptureOutput, so the ordinary
+// confirmation text every replayed line's own handler prints,
+// "Hostname set to %s." for instance, never reaches a fresh process's
+// own terminal before anyone has even logged in, the same way a real
+// device's own boot sequence never echoes back every line of the
+// configuration it is loading either. Nothing is thrown away outright,
+// though: each captured line is logged at Debugln level instead, so
+// verbose troubleshooting, LogLevel turned up in etc/routercli.yaml,
+// can still see exactly what was applied.
+//
+// ctx.Position and ctx.Session.CommandLevel are both reset back to
+// the base level before this returns, success or failure, through a
+// deferred reset. Replaying "enable" and "configure terminal" style
+// lines necessarily walks ctx.Position deep into whatever Command
+// Levels the saved configuration touched, exec and config among them
+// in this project's own shipped tree, and that must never be what a
+// session about to log in, or about to start completely
+// unauthenticated when AuthRequired is off, actually starts from.
+// Every mutation this function's own replay makes to ctx.State
+// itself, and to any Command Level's own PasswordHash through a
+// replayed "password manager hash" line, is deliberately left in
+// place; only the navigation state this function itself used to get
+// there is undone.
+func loadStartupConfig(ctx *command.AppContext, path string) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	base := ctx.Levels.Base()
+	defer func() {
+		ctx.Position = command.NewCommandLevelStack(base.Name, base.PromptSuffix, base.Tree)
+		ctx.Session.CommandLevel = base.Name
+	}()
+
+	lines := strings.Split(string(data), "\n")
+	var replayErr error
+	captured, cerr := paging.CaptureOutput(func() {
+		replayErr = command.ReplayLines(ctx, lines, true)
+	})
+	if cerr != nil {
+		return cerr
+	}
+	for _, line := range captured {
+		ctx.Logger.Debugln("DEBUG: startup-config replay:", line)
+	}
+	return replayErr
+}
+
 // attachPasswordRateLimiters - This function walks every loaded
 // Command Level's tree and attaches a fresh auth.RateLimiter to each
-// command that has a PasswordHash set. See
+// command whose EffectivePasswordHash, PasswordHash or
+// VendorDefinedPasswordHash, is non-empty. See
 // Command.PasswordRateLimiter's own doc comment for what it is for.
 //
 // visited tracks *command.Command pointers, not names, since the same
@@ -1068,7 +1267,7 @@ func attachPasswordRateLimiters(levels *command.TreeStructure, maxAttempts int, 
 				continue
 			}
 			visited[cmd] = true
-			if cmd.PasswordHash != "" {
+			if cmd.EffectivePasswordHash() != "" {
 				cmd.PasswordRateLimiter = auth.NewRateLimiter(maxAttempts, window, lockout)
 			}
 			walk(cmd.Subcommands)
@@ -1118,19 +1317,60 @@ func sortedUserNames(users auth.Users) []string {
 
 // warnPlaintextLevelSecrets - This function is the Tree Structure
 // equivalent of warnPlaintextUserSecrets above. It warns, at "warn"
-// level, about any Command Level whose PasswordHash is stored in
-// plaintext form. This can only happen if
-// var/tree/tree_structure.yaml itself was hand-edited with a raw
-// "$0$..." value in password_hash:, since "password manager
-// <secret>", cmd/core/cmd_password_manager.go, always calls
-// auth.HashPassword, which never produces the plaintext form. So this
-// path only catches a manifest that was authored that way directly,
-// the same testing convenience reasoning as the login side.
+// level, about any Command Level whose PasswordHash or
+// VendorDefinedPasswordHash is stored in plaintext form. This can
+// only happen if var/tree/tree_structure.yaml itself was hand-edited
+// with a raw "$0$..." value, since "password manager <secret>",
+// cmd/core/cmd_password_manager.go, always calls auth.HashPassword,
+// which never produces the plaintext form, and nothing in this
+// project ever writes VendorDefinedPasswordHash at all, that field
+// only ever comes from a hand-authored manifest. So this path only
+// catches a manifest that was authored that way directly, the same
+// testing convenience reasoning as the login side, and it matters
+// more for a plaintext VendorDefinedPasswordHash than an ordinary
+// one, since that field is the one meant to stay secret from the end
+// user reading their own configuration.
 func warnPlaintextLevelSecrets(logger *log.Logger, levels *command.TreeStructure) {
 	for _, level := range levels.Order {
 		if auth.IsPlaintextHash(level.PasswordHash) {
 			logger.Warnln("WARN: Command Level", level.Name, "has a plaintext (non-hashed) password_hash set - this must never be used in a real deployment")
 		}
+		if auth.IsPlaintextHash(level.VendorDefinedPasswordHash) {
+			logger.Warnln("WARN: Command Level", level.Name, "has a plaintext (non-hashed) vendor_defined_password_hash set - this must never be used in a real deployment")
+		}
+	}
+}
+
+// warnPlaintextCommandSecrets - This function is warnPlaintextLevelSecrets's
+// own counterpart for an individual Command's PasswordHash and
+// VendorDefinedPasswordHash, walking every loaded Command Level's tree
+// the same visited-pointer way attachPasswordRateLimiters does, so a
+// command reachable through more than one level, by InheritParent, is
+// still only warned about once.
+func warnPlaintextCommandSecrets(logger *log.Logger, levels *command.TreeStructure) {
+	visited := make(map[*command.Command]bool)
+	var walk func(path string, tree map[string]*command.Command)
+	walk = func(path string, tree map[string]*command.Command) {
+		for name, cmd := range tree {
+			if visited[cmd] {
+				continue
+			}
+			visited[cmd] = true
+			full := name
+			if path != "" {
+				full = path + " " + name
+			}
+			if auth.IsPlaintextHash(cmd.PasswordHash) {
+				logger.Warnln("WARN: command", full, "has a plaintext (non-hashed) password_hash set - this must never be used in a real deployment")
+			}
+			if auth.IsPlaintextHash(cmd.VendorDefinedPasswordHash) {
+				logger.Warnln("WARN: command", full, "has a plaintext (non-hashed) vendor_defined_password_hash set - this must never be used in a real deployment")
+			}
+			walk(full, cmd.Subcommands)
+		}
+	}
+	for _, level := range levels.Order {
+		walk("", level.Tree)
 	}
 }
 
@@ -1252,7 +1492,6 @@ func processCommandLineFlags() (configFile string, checkConfig bool) {
 	defaultConfigFilename := "etc/routercli.yaml"
 	sOptConfigFilename := getopt.StringLong("config", 'c', defaultConfigFilename, "The main configuration file", "string")
 	bOptHashPassword := getopt.BoolLong("hashpassword", 0, "Create a bcrypt hash suitable for etc/users.yaml")
-	sOptTOTPSetup := getopt.StringLong("mfa", 'm', "", "Generate a TOTP config for <username>")
 	bOptCheckConfig := getopt.BoolLong("check-config", 0, "Load and verify the tree structure and Command Levels, then exit")
 	bOptHelp := getopt.BoolLong("help", 0, "Help")
 	bOptVer := getopt.BoolLong("version", 0, "Version")
@@ -1281,12 +1520,6 @@ func processCommandLineFlags() (configFile string, checkConfig bool) {
 	// runHashPasswordUtility and exit.
 	if *bOptHashPassword {
 		runHashPasswordUtility(os.Stdin)
-		os.Exit(0)
-	}
-
-	// If the mfa flag was given, run runTOTPSetupUtility and exit.
-	if *sOptTOTPSetup != "" {
-		runTOTPSetupUtility(*sOptConfigFilename, *sOptTOTPSetup, os.Stdin)
 		os.Exit(0)
 	}
 

@@ -85,3 +85,30 @@ func TestIsPlaintextHash(t *testing.T) {
 		t.Error("expected a malformed stored value to not be reported as plaintext")
 	}
 }
+
+// TestIsRecognizedHash - This test verifies IsRecognizedHash across a
+// real bcrypt hash, the plaintext storage form, which is itself a
+// registered id and so counts as recognized here even though
+// IsPlaintextHash treats it specially, an id nothing has registered,
+// and a value that is not even "$id$encoded" shaped at all.
+func TestIsRecognizedHash(t *testing.T) {
+	hash, err := HashPassword("hunter2")
+	if err != nil {
+		t.Fatalf("HashPassword returned error: %v", err)
+	}
+	if !IsRecognizedHash(hash) {
+		t.Error("expected a real bcrypt hash to be recognized")
+	}
+	if !IsRecognizedHash("$0$hunter2") {
+		t.Error("expected the plaintext storage form to be recognized, even though it is not itself a real hash")
+	}
+	if IsRecognizedHash("$99$whatever") {
+		t.Error("expected an id nothing has registered to not be recognized")
+	}
+	if IsRecognizedHash("not-even-dollar-prefixed") {
+		t.Error("expected a malformed value to not be recognized")
+	}
+	if IsRecognizedHash("") {
+		t.Error("expected an empty value to not be recognized")
+	}
+}

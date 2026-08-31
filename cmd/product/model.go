@@ -39,6 +39,18 @@ type ProductState struct {
 	Description string
 	Hostname    string
 	Interfaces  map[string]*InterfaceState
+
+	// BannerMOTD and BannerLogin hold "banner motd <text>" and
+	// "banner login <text>", see cmd_banner.go. Both are shown before
+	// authentication, BannerMOTD first, matching real Cisco's own
+	// ordering, "message of the day" being about the connection
+	// itself, shown regardless of whether a login prompt follows at
+	// all, while BannerLogin is shown only immediately before a real
+	// login prompt actually runs, see main.go's printBanner and
+	// establishSession. An empty string, the default, prints nothing
+	// at all, exactly like an interface with no Description ever set.
+	BannerMOTD  string
+	BannerLogin string
 }
 
 // InterfaceState - This type holds the per-interface values config-if

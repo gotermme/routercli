@@ -247,9 +247,8 @@ interactive body, runTOTPEnable, differing only in which of
 printTOTPSecret or printTOTPEnrollmentQR is called first. These
 commands update a User's TOTPSecret and persist that change with
 auth.SaveUsers, rather than only holding it in memory for the rest of
-this one session, so enrolling or removing a second factor no longer
-requires stopping the program and relaunching it with the --mfa flag
-the way it used to.
+this one session, so enrolling or removing a second factor never
+requires stopping the program.
 
 Every handler here splits its interactive, terminal-reading half from
 its verify-and-save half, finishTOTPEnable and finishTOTPDisable, the

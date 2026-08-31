@@ -150,6 +150,87 @@ func TestEffectivePageLinesUsesRealTerminalHeightMinusOne(t *testing.T) {
 
 // ----------------------------------------------------------------------
 //
+// EffectiveTerminalWidth
+//
+// ----------------------------------------------------------------------
+
+// TestEffectiveTerminalWidthReturnsOverrideExactly - This test
+// verifies that a non-nil override, "terminal width" already typed
+// this session, is returned exactly as given, with no further
+// adjustment, mirroring
+// TestEffectivePageLinesReturnsOverrideExactly above for its sibling
+// function.
+func TestEffectiveTerminalWidthReturnsOverrideExactly(t *testing.T) {
+	for _, want := range []int{0, 1, 80, 512} {
+		override := want
+		got := EffectiveTerminalWidth(int(os.Stdin.Fd()), &override)
+		if got != want {
+			t.Errorf("EffectiveTerminalWidth with override %d = %d, want %d unchanged", want, got, want)
+		}
+	}
+}
+
+// TestEffectiveTerminalWidthReturnsZeroWhenFDIsNotATerminal - This
+// test verifies that with no override and fd not a real terminal, an
+// ordinary os.Pipe here, zero is returned, the "cannot be determined"
+// convention this function documents for that case.
+func TestEffectiveTerminalWidthReturnsZeroWhenFDIsNotATerminal(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to open a pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	got := EffectiveTerminalWidth(int(r.Fd()), nil)
+	if got != 0 {
+		t.Errorf("EffectiveTerminalWidth = %d, want 0", got)
+	}
+}
+
+// TestEffectiveTerminalWidthUsesRealTerminalWidth - This test
+// verifies that with no override and fd a real pty, the detected
+// width is returned as is, with no adjustment of the kind
+// EffectivePageLines applies to height for its own "--More--" prompt.
+func TestEffectiveTerminalWidthUsesRealTerminalWidth(t *testing.T) {
+	master, slave := newPTY(t)
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 100}); err != nil {
+		t.Fatalf("failed to set the pty's own size: %v", err)
+	}
+
+	got := EffectiveTerminalWidth(int(slave.Fd()), nil)
+	if got != 100 {
+		t.Errorf("EffectiveTerminalWidth = %d, want 100", got)
+	}
+}
+
+// TestEffectiveTerminalWidthReflectsAResizeWithNoStaleness - This
+// test verifies the core claim behind item 7 of the Framework Gap
+// Roadmap: EffectiveTerminalWidth reads term.GetSize fresh on every
+// call, so a resize between two calls, github.com/creack/pty's own
+// Setsize here standing in for a real SIGWINCH-driving terminal
+// emulator resize, is reflected immediately on the very next call,
+// with no caching of an earlier, now stale value anywhere in this
+// function.
+func TestEffectiveTerminalWidthReflectsAResizeWithNoStaleness(t *testing.T) {
+	master, slave := newPTY(t)
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 80}); err != nil {
+		t.Fatalf("failed to set the pty's own initial size: %v", err)
+	}
+	if got := EffectiveTerminalWidth(int(slave.Fd()), nil); got != 80 {
+		t.Fatalf("EffectiveTerminalWidth before resize = %d, want 80", got)
+	}
+
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 120}); err != nil {
+		t.Fatalf("failed to resize the pty: %v", err)
+	}
+	if got := EffectiveTerminalWidth(int(slave.Fd()), nil); got != 120 {
+		t.Errorf("EffectiveTerminalWidth after resize = %d, want 120", got)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
 // Display - the skip-pausing paths
 //
 // ----------------------------------------------------------------------

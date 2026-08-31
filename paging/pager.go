@@ -43,6 +43,34 @@ func EffectivePageLines(fd int, override *int, fallback int) int {
 	return fallback
 }
 
+// EffectiveTerminalWidth returns how wide this session's own terminal
+// currently is, the same override, live-detected fallback shape
+// EffectivePageLines above already gives page height. override is
+// AppContext.TerminalWidth, nil when no "terminal width" has ever been
+// typed this session, in which case the real, live width behind fd is
+// read fresh with term.GetSize, exactly the way EffectivePageLines
+// itself reads a real terminal's height fresh on every call, so this
+// function's own result already reflects a mid-session resize with no
+// staleness of its own to correct, before "terminal width" has ever
+// been typed. A non-interactive fd, piped or redirected stdin for
+// instance, or one whose size genuinely cannot be read, returns zero,
+// the same "cannot be determined" convention "show terminal" already
+// treated a never-detected width as before this function existed, see
+// cmd/core/cmd_show.go's terminalStatusLines, the one caller.
+//
+// A non-nil override is returned exactly as given, with no further
+// adjustment, the same treatment EffectivePageLines gives a non-nil
+// PageLines override.
+func EffectiveTerminalWidth(fd int, override *int) int {
+	if override != nil {
+		return *override
+	}
+	if w, _, err := term.GetSize(fd); err == nil && w > 0 {
+		return w
+	}
+	return 0
+}
+
 // Display writes lines to stdout, pausing with a translated
 // "--More--" prompt, see the "pager.more_prompt" catalog key, once
 // every pageLines lines, exactly the way a real Cisco or HP device's

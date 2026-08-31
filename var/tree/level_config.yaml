@@ -20,6 +20,28 @@ commands:
     # whichever interface name was given.
     run: interface
 
+  banner:
+    desc_key: banner.desc
+    subcommands:
+      motd:
+        desc_key: banner.motd.desc
+        minargs: 1
+        maxargs: 1
+        maxarglength: 256
+        arghelp_key: banner.motd.arghelp
+        # "no banner motd" clears it. See cmd/product/cmd_banner.go.
+        negatable: true
+        run: banner.motd
+      login:
+        desc_key: banner.login.desc
+        minargs: 1
+        maxargs: 1
+        maxarglength: 256
+        arghelp_key: banner.login.arghelp
+        # "no banner login" clears it. See cmd/product/cmd_banner.go.
+        negatable: true
+        run: banner.login
+
   password:
     desc_key: password.desc
     subcommands:
@@ -31,6 +53,18 @@ commands:
         # argument needed.
         negatable: true
         run: password-manager
+        subcommands:
+          hash:
+            desc_key: password.manager.hash.desc
+            arghelp_key: password.manager.hash.arghelp
+            minargs: 1
+            maxargs: 1
+            # Takes an already-hashed value directly, never a
+            # plaintext password, see cmd_password_manager.go's own
+            # doc comment on "password manager hash" for the whole
+            # reasoning, restoring a Command Level's secret from
+            # saved configuration text rather than a live prompt.
+            run: password-manager.hash
 
   terminal:
     desc_key: terminal.desc
@@ -53,3 +87,12 @@ commands:
         maxargs: 1
         arghelp_key: terminal.filter_mode.arghelp
         run: terminal.filter-mode
+      history:
+        desc_key: terminal.history.desc
+        subcommands:
+          size:
+            desc_key: terminal.history.size.desc
+            minargs: 1
+            maxargs: 1
+            arghelp_key: terminal.history.size.arghelp
+            run: terminal.history.size

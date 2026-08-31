@@ -224,8 +224,7 @@ func printTOTPSecret(ctx *command.AppContext, secret string) {
 
 // printTOTPEnrollmentQR - This function shows a freshly generated
 // TOTP secret both as a scannable QR code and as plain text for
-// manual entry, the "totp enable qr" presentation, the same one
-// main.go's runTOTPSetupUtility already uses for the --mfa flag.
+// manual entry, the "totp enable qr" presentation.
 func printTOTPEnrollmentQR(ctx *command.AppContext, secret string) error {
 	uri := auth.TOTPProvisioningURI(ctx.TOTPIssuer, ctx.Session.Username, secret)
 	qr, err := qrcode.New(uri, qrcode.Medium)

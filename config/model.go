@@ -34,8 +34,11 @@ type SystemConfig struct {
 	LanguageDir                    string   `yaml:"LanguageDir"`
 	SessionIdleTimeout             Duration `yaml:"SessionIdleTimeout"`
 	ElevationTimeout               Duration `yaml:"ElevationTimeout"`
+	ReauthGracePeriod              Duration `yaml:"ReauthGracePeriod"`
+	SuConfigTrustWindow            Duration `yaml:"SuConfigTrustWindow"`
 	TreeStructure                  string   `yaml:"TreeStructure"`
 	CommonTreeFile                 string   `yaml:"CommonTreeFile"`
+	StartupConfigFile              string   `yaml:"StartupConfigFile"`
 	AuthRequired                   bool     `yaml:"AuthRequired"`
 	UsersFile                      string   `yaml:"UsersFile"`
 	LoginMaxAttempts               int      `yaml:"LoginMaxAttempts"`
@@ -166,6 +169,19 @@ type SystemConfig struct {
 	// one that has typed "terminal length" explicitly, both use a
 	// different value instead, see paging.EffectivePageLines.
 	DefaultPageLines int `yaml:"DefaultPageLines"`
+
+	// DefaultHistorySize, 500 by default, matching the underlying
+	// readline library's own built-in default, formerly invisible to
+	// anyone reading this file, fixes how many past commands this
+	// session's own Up and Down arrow recall remembers for the whole
+	// life of the session, and, unless a session types "terminal
+	// history size <n>" itself, how many lines "show history" prints
+	// back. Only the second of those two can change after startup, a
+	// session that types "terminal history size" affecting "show
+	// history" alone, never the Up and Down arrow recall limit,
+	// already fixed by this value the moment the session began; see
+	// command.AppContext.HistorySize's own doc comment for why.
+	DefaultHistorySize int `yaml:"DefaultHistorySize"`
 
 	// FilterMatchMode, "substring" by default, chooses how a
 	// "| include", "| exclude", or "| begin" pattern is matched

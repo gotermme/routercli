@@ -265,11 +265,81 @@ func RequireCurrentCommandLevel(ctx *AppContext, target, parent string) error {
 	return nil
 }
 
+// withinReauthGracePeriod - This function reports whether level's own
+// LastAuthenticatedAt is recent enough, against ctx.ReauthGracePeriod,
+// that EnterCommandLevel should let a session back in without
+// prompting again. False whenever ReauthGracePeriod is zero, this
+// project's original behavior, every entry always prompts, or when
+// LastAuthenticatedAt is still its zero value, meaning no real prompt
+// has ever actually succeeded for this level in this run of the
+// program. This is deliberately never satisfied by anything other than
+// a real, live password check succeeding inside EnterCommandLevel
+// itself; nothing that only sets what PasswordHash equals is allowed
+// to set LastAuthenticatedAt, see that field's own doc comment in
+// model.go for why treating the two as the same thing would be a real
+// pass the hash vulnerability.
+func withinReauthGracePeriod(ctx *AppContext, level *CommandLevel) bool {
+	if ctx.ReauthGracePeriod <= 0 {
+		return false
+	}
+	if level.LastAuthenticatedAt.IsZero() {
+		return false
+	}
+	return time.Since(level.LastAuthenticatedAt) < ctx.ReauthGracePeriod
+}
+
+// withinSuConfigTrust - This function reports whether some level
+// marked GrantsReplayTrust was really, live authenticated recently
+// enough, against ctx.SuConfigTrustWindow, that EnterCommandLevel
+// should let a session into level, any level, without prompting
+// again. False whenever SuConfigTrustWindow is zero, this project's
+// original behavior, every entry always prompts, or when no level in
+// ctx.Levels carries GrantsReplayTrust at all, or when the one, or
+// more, that do have never actually been entered with a real password
+// in this run of the program.
+//
+// This is deliberately as narrow, in what it accepts as proof, as
+// withinReauthGracePeriod above: only a real, live password check
+// succeeding inside EnterCommandLevel itself ever sets
+// LastAuthenticatedAt on any level, GrantsReplayTrust included,
+// see that field's own doc comment in model.go. What this function
+// adds on top is scope, not a weaker kind of proof: one such real
+// check, at a level built specifically to require one,
+// var/tree/README.md's own su-config for instance, is trusted widely
+// enough to also waive every other level's own prompt for a bounded
+// window afterward, so a whole saved configuration can be pasted back
+// in and reproduce the exact same access it had before without
+// hitting a prompt at every gated level along the way. See
+// EnterCommandLevel's own case for this, right above, for why it
+// deliberately never marks the level actually being entered as though
+// its own credential had been proven too.
+func withinSuConfigTrust(ctx *AppContext) bool {
+	if ctx.SuConfigTrustWindow <= 0 {
+		return false
+	}
+	if ctx.Levels == nil {
+		return false
+	}
+	for _, l := range ctx.Levels.Order {
+		if !l.GrantsReplayTrust {
+			continue
+		}
+		if l.LastAuthenticatedAt.IsZero() {
+			continue
+		}
+		if time.Since(l.LastAuthenticatedAt) < ctx.SuConfigTrustWindow {
+			return true
+		}
+	}
+	return false
+}
+
 // EnterCommandLevel - This function does the generic, mechanical work
 // of moving a session into a root swap Command Level. That work is
-// RequireCurrentCommandLevel, the password check, updating
-// Session.CommandLevel and Session.CommandLevelEnteredAt, and
-// swapping the root CommandLevelStack frame through SetRootTree. It
+// RequireCurrentCommandLevel, the password check, or honoring a recent
+// enough LastAuthenticatedAt in its place, see withinReauthGracePeriod
+// above, updating Session.CommandLevel and Session.CommandLevelEnteredAt,
+// and swapping the root CommandLevelStack frame through SetRootTree. It
 // deliberately does not print, log, or audit anything. Whether and
 // how to tell the user that the session moved, whether to write a log
 // line or an audit entry, or to say nothing at all, is entirely the
@@ -312,7 +382,43 @@ func EnterCommandLevel(ctx *AppContext, level, parent *CommandLevel) (entered bo
 	if err := RequireCurrentCommandLevel(ctx, level.Name, level.Parent); err != nil {
 		return false, err
 	}
-	if level.PasswordHash != "" {
+	switch effectiveHash := level.EffectivePasswordHash(); {
+	case ctx.ReplayingStartupConfig:
+		// Trusted boot time replay, see AppContext.ReplayingStartupConfig's
+		// own doc comment. Checked first, before effectiveHash is even
+		// looked at, since this waves a session through regardless of
+		// whether level actually has a password configured at all.
+		// Deliberately does NOT set level.LastAuthenticatedAt: nobody
+		// typed a credential here, real or otherwise, the trust comes
+		// from this code running as this operating system process at
+		// all, a different kind of proof than anything
+		// withinReauthGracePeriod or withinSuConfigTrust ever accept,
+		// and letting it masquerade as one of those would let a
+		// session that later reenters this same level, for real, skip
+		// a prompt it never actually earned.
+	case effectiveHash == "":
+		// No password at all, nothing to check.
+	case withinReauthGracePeriod(ctx, level):
+		// Within the grace period from a real, earlier prompt this
+		// same run of the program already answered; see
+		// withinReauthGracePeriod below. Sliding the window forward
+		// again here, the same way sudo's own cached authentication
+		// does, means a session that keeps stepping back into this
+		// level regularly never has to re-answer as long as it never
+		// actually goes stale, rather than the window only ever
+		// counting down from the first prompt.
+		level.LastAuthenticatedAt = time.Now()
+	case withinSuConfigTrust(ctx):
+		// Granted through su-config's own recent, real, live
+		// credential check, see withinSuConfigTrust below, not
+		// through anything at this level itself. Deliberately does
+		// NOT set level.LastAuthenticatedAt: nobody actually proved
+		// this level's own credential, only su-config's, and letting
+		// this branch mark this level as if it had been would falsely
+		// let a later, ordinary reentry skip the prompt through
+		// withinReauthGracePeriod once SuConfigTrustWindow itself has
+		// long since expired.
+	default:
 		// Checked before ever prompting. See this function's own doc
 		// comment on the four return value cases for why a locked out
 		// session is not invited to try again.
@@ -320,11 +426,12 @@ func EnterCommandLevel(ctx *AppContext, level, parent *CommandLevel) (entered bo
 			return false, fmt.Errorf("%s", ctx.Translator.T("auth.too_many_attempts", auth.RoundForDisplay(retryAfter)))
 		}
 		password, perr := auth.PromptSecret(os.Stdout, int(os.Stdin.Fd()), ctx.Translator)
-		if perr != nil || !auth.VerifyPassword(level.PasswordHash, password) {
+		if perr != nil || !auth.VerifyPassword(effectiveHash, password) {
 			level.RateLimiter.RecordFailure()
 			return false, fmt.Errorf("%s", ctx.Translator.T("commandlevel.access_denied"))
 		}
 		level.RateLimiter.RecordSuccess()
+		level.LastAuthenticatedAt = time.Now()
 	}
 	ctx.Session.CommandLevel = level.Name
 	ctx.Session.CommandLevelEnteredAt = time.Now()

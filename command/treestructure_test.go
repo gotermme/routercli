@@ -787,6 +787,493 @@ func TestEnterCommandLevelRateLimiterDisabledWhenNotConfigured(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+//
+// EnterCommandLevel, VendorDefinedPasswordHash
+//
+// ----------------------------------------------------------------------
+
+// TestEnterCommandLevelGatesOnVendorDefinedPasswordHashAlone - This
+// test verifies that a level with no ordinary PasswordHash at all,
+// only a VendorDefinedPasswordHash, still gates EnterCommand exactly
+// the way an ordinary PasswordHash would: rate limited, prompted, and
+// refused on a failed prompt in this non-interactive test environment.
+// Without EnterCommandLevel calling EffectivePasswordHash rather than
+// reading level.PasswordHash directly, a level configured this way
+// would let anyone straight in, silently making
+// VendorDefinedPasswordHash inert.
+func TestEnterCommandLevelGatesOnVendorDefinedPasswordHashAlone(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.VendorDefinedPasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+	// PasswordHash deliberately left empty.
+
+	ctx := testContext(t, levels, "operator")
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt gated by VendorDefinedPasswordHash alone, got entered=%v err=%v", entered, err)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// EnterCommandLevel, ReauthGracePeriod
+//
+// ----------------------------------------------------------------------
+
+// TestEnterCommandLevelGracePeriodDisabledByDefault - This test verifies
+// that leaving AppContext.ReauthGracePeriod at its zero value, exactly
+// how testContext and DefaultSystemConfig both leave it, never waves a
+// prompt through no matter how recently LastAuthenticatedAt was set.
+// withinReauthGracePeriod's own first check is ctx.ReauthGracePeriod <=
+// 0, and this is the test that proves that check actually gates entry
+// rather than only being reachable in theory.
+func TestEnterCommandLevelGracePeriodDisabledByDefault(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+	exec.LastAuthenticatedAt = time.Now()
+
+	ctx := testContext(t, levels, "operator")
+	// ReauthGracePeriod left at its zero value.
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt with ReauthGracePeriod disabled, even one second after LastAuthenticatedAt, got entered=%v err=%v", entered, err)
+	}
+}
+
+// TestEnterCommandLevelGracePeriodWavesThroughRecentAuth - This test
+// verifies the actual sudo like behavior: with ReauthGracePeriod
+// configured and LastAuthenticatedAt recent, EnterCommandLevel succeeds
+// with no prompt at all, even though PasswordHash is set to a value
+// that would fail this non-interactive test's password prompt if one
+// were actually attempted. It also verifies the window slides, that is,
+// a successful grace period entry itself refreshes LastAuthenticatedAt
+// rather than leaving the original timestamp in place.
+func TestEnterCommandLevelGracePeriodWavesThroughRecentAuth(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-never-reached-in-this-test"
+	original := time.Now().Add(-10 * time.Second)
+	exec.LastAuthenticatedAt = original
+
+	ctx := testContext(t, levels, "operator")
+	ctx.ReauthGracePeriod = time.Minute
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error within the grace period: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true when LastAuthenticatedAt is within ReauthGracePeriod")
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "exec")
+	}
+	if !exec.LastAuthenticatedAt.After(original) {
+		t.Error("expected a grace period entry to slide LastAuthenticatedAt forward, not leave the original timestamp in place")
+	}
+}
+
+// TestEnterCommandLevelGracePeriodExpiredPromptsAgain - This test
+// verifies the boundary the sudo comparison depends on: once more time
+// has passed than ReauthGracePeriod allows, EnterCommandLevel falls
+// back to a real password prompt exactly as if LastAuthenticatedAt had
+// never been set at all.
+func TestEnterCommandLevelGracePeriodExpiredPromptsAgain(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+	exec.LastAuthenticatedAt = time.Now().Add(-2 * time.Minute)
+
+	ctx := testContext(t, levels, "operator")
+	ctx.ReauthGracePeriod = time.Minute
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt once ReauthGracePeriod has elapsed, got entered=%v err=%v", entered, err)
+	}
+}
+
+// TestEnterCommandLevelGracePeriodIgnoredWithoutPriorAuth - This test
+// verifies that a zero valued LastAuthenticatedAt, the state every
+// level starts in before it has ever actually been entered with a
+// typed password, is never treated as "within the grace period" no
+// matter how large ReauthGracePeriod is configured. Without this check,
+// a freshly started process would wave through the very first entry
+// attempt at any password protected level, which would defeat the
+// point of the password entirely.
+func TestEnterCommandLevelGracePeriodIgnoredWithoutPriorAuth(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+	// LastAuthenticatedAt left at its zero value, never set.
+
+	ctx := testContext(t, levels, "operator")
+	ctx.ReauthGracePeriod = time.Hour
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt when LastAuthenticatedAt was never set, regardless of ReauthGracePeriod, got entered=%v err=%v", entered, err)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// EnterCommandLevel, SuConfigTrustWindow (GrantsReplayTrust)
+//
+// ----------------------------------------------------------------------
+
+// TestEnterCommandLevelSuConfigTrustWavesThroughAnotherLevel - This
+// test verifies the actual mechanism su-config exists for: a level
+// with no real relationship to the one being entered, other than
+// GrantsReplayTrust and a recent, real LastAuthenticatedAt, is enough
+// to let EnterCommandLevel into a completely different, unrelated
+// password protected level without prompting, and without marking
+// that other level's own LastAuthenticatedAt as though it had been
+// proven too.
+func TestEnterCommandLevelSuConfigTrustWavesThroughAnotherLevel(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-never-reached-in-this-test"
+
+	// suConfig is not exec's parent, and shares nothing with it beyond
+	// both being levels in the same TreeStructure. Its own recent,
+	// real authentication is what should carry the trust here.
+	suConfig := &CommandLevel{Name: "su-config", GrantsReplayTrust: true, LastAuthenticatedAt: time.Now()}
+	levels.Order = append(levels.Order, suConfig)
+	levels.ByName["su-config"] = suConfig
+
+	ctx := testContext(t, levels, "operator")
+	ctx.SuConfigTrustWindow = time.Minute
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error within the su-config trust window: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true when a GrantsReplayTrust level was recently, really authenticated")
+	}
+	if !exec.LastAuthenticatedAt.IsZero() {
+		t.Error("expected exec's own LastAuthenticatedAt to stay zero: su-config's authentication was never proof of exec's own credential")
+	}
+}
+
+// TestEnterCommandLevelSuConfigTrustDisabledByDefault - This test
+// verifies that leaving AppContext.SuConfigTrustWindow at its zero
+// value, exactly how testContext leaves it (DefaultSystemConfig's own
+// nonzero default is main.go's concern, not this package's), never
+// waves a prompt through, no matter how recently some GrantsReplayTrust
+// level was authenticated.
+func TestEnterCommandLevelSuConfigTrustDisabledByDefault(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+
+	suConfig := &CommandLevel{Name: "su-config", GrantsReplayTrust: true, LastAuthenticatedAt: time.Now()}
+	levels.Order = append(levels.Order, suConfig)
+	levels.ByName["su-config"] = suConfig
+
+	ctx := testContext(t, levels, "operator")
+	// SuConfigTrustWindow left at its zero value.
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt with SuConfigTrustWindow disabled, got entered=%v err=%v", entered, err)
+	}
+}
+
+// TestEnterCommandLevelSuConfigTrustExpiredPromptsAgain - This test
+// verifies the boundary: once more time has passed than
+// SuConfigTrustWindow allows since the GrantsReplayTrust level's own
+// LastAuthenticatedAt, EnterCommandLevel falls back to a real password
+// prompt for the unrelated level being entered.
+func TestEnterCommandLevelSuConfigTrustExpiredPromptsAgain(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+
+	suConfig := &CommandLevel{Name: "su-config", GrantsReplayTrust: true, LastAuthenticatedAt: time.Now().Add(-2 * time.Minute)}
+	levels.Order = append(levels.Order, suConfig)
+	levels.ByName["su-config"] = suConfig
+
+	ctx := testContext(t, levels, "operator")
+	ctx.SuConfigTrustWindow = time.Minute
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt once SuConfigTrustWindow has elapsed, got entered=%v err=%v", entered, err)
+	}
+}
+
+// TestEnterCommandLevelSuConfigTrustIgnoresLevelsNotMarked - This test
+// verifies that a level's own recent LastAuthenticatedAt, on its own,
+// never grants trust for a different level unless GrantsReplayTrust is
+// actually set; an ordinary level a session simply happened to
+// authenticate into recently must never become an accidental
+// su-config.
+func TestEnterCommandLevelSuConfigTrustIgnoresLevelsNotMarked(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+
+	// An ordinary level, GrantsReplayTrust left false, was very
+	// recently, really authenticated. This must not count.
+	other := &CommandLevel{Name: "other", LastAuthenticatedAt: time.Now()}
+	levels.Order = append(levels.Order, other)
+	levels.ByName["other"] = other
+
+	ctx := testContext(t, levels, "operator")
+	ctx.SuConfigTrustWindow = time.Minute
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt, an ordinary level's own recent auth must not grant su-config style trust, got entered=%v err=%v", entered, err)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// EnterCommandLevel, ReplayingStartupConfig
+//
+// ----------------------------------------------------------------------
+
+// TestEnterCommandLevelReplayingStartupConfigBypassesPasswordCheck -
+// This test verifies boot time trusted replay's own bypass case, the
+// one command.ReplayLines sets for the caller, see
+// AppContext.ReplayingStartupConfig's own doc comment: a level with a
+// real password configured is entered with no prompt at all, and
+// without recording LastAuthenticatedAt, since nobody actually typed
+// a credential here, real or otherwise. The password itself is
+// deliberately garbage; a real check, or a real prompt against this
+// test's own non-terminal stdin, would fail or hang rather than let
+// this test pass.
+func TestEnterCommandLevelReplayingStartupConfigBypassesPasswordCheck(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-never-actually-be-checked"
+
+	ctx := testContext(t, levels, "operator")
+	ctx.ReplayingStartupConfig = true
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error under ReplayingStartupConfig: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true, ReplayingStartupConfig must waive the password check entirely")
+	}
+	if !exec.LastAuthenticatedAt.IsZero() {
+		t.Error("expected exec's own LastAuthenticatedAt to stay zero: boot time replay is not a real, live credential check")
+	}
+}
+
+// TestEnterCommandLevelReplayingStartupConfigFalseStillPrompts - This
+// test is the companion sanity check: with ReplayingStartupConfig
+// left at its zero value, false, a real password still refuses entry
+// exactly as every other test in this file already expects, confirming
+// the new case added nothing beyond its own narrow, explicit trigger.
+func TestEnterCommandLevelReplayingStartupConfigFalseStillPrompts(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	operator := levels.ByName["operator"]
+	exec.PasswordHash = "$6$$irrelevant-should-be-reached-and-fail"
+
+	ctx := testContext(t, levels, "operator")
+	// ReplayingStartupConfig left at its zero value, false.
+
+	entered, err := EnterCommandLevel(ctx, exec, operator)
+	if entered || err == nil {
+		t.Errorf("expected a real password prompt with ReplayingStartupConfig false, got entered=%v err=%v", entered, err)
+	}
+}
+
 // TestEnterCommandLevelRefusesFromWrongParent - This test verifies that
 // EnterCommandLevel refuses to move a session directly into a level
 // while skipping that level's actual parent.

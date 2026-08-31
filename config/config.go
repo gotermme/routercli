@@ -123,6 +123,7 @@ func DefaultSystemConfig() SystemConfig {
 		LanguageDir:                 "var/lang",
 		TreeStructure:               "var/tree/tree_structure.yaml",
 		CommonTreeFile:              "var/tree/level_common.yaml",
+		StartupConfigFile:           "var/startup-config/startup-config",
 		AuthRequired:                false,
 		UsersFile:                   "etc/users.yaml",
 		LoginMaxAttempts:            3,
@@ -142,8 +143,25 @@ func DefaultSystemConfig() SystemConfig {
 		MergeCommonCommands:         true,
 		PagingEnabled:               true,
 		DefaultPageLines:            24,
+		DefaultHistorySize:          500,
 		FilterMatchMode:             "substring",
 		MaxFilterChainDepth:         2,
+		// Unlike SessionIdleTimeout, ElevationTimeout, and
+		// ReauthGracePeriod above, all of which default to zero,
+		// disabled, this one defaults to a real, nonzero value. Those
+		// three are each a narrowing of otherwise-already-working
+		// behavior, opt in for a project that wants the extra
+		// restriction or convenience. SuConfigTrustWindow is the
+		// opposite: zero would leave su-config, a level built
+		// specifically to let a saved configuration paste back in
+		// without hitting a prompt at every gated level along the way,
+		// unable to actually do that job out of the box. Five minutes
+		// is long enough to paste even a sizeable configuration by
+		// hand, short enough that it is never mistaken for a standing
+		// bypass. See CommandLevel.GrantsReplayTrust and
+		// AppContext.SuConfigTrustWindow's own doc comments in
+		// command/model.go, and etc/README.md, for the full reasoning.
+		SuConfigTrustWindow: Duration(5 * time.Minute),
 	}
 }
 
@@ -250,6 +268,10 @@ func (c SystemConfig) validate() error {
 		return fmt.Errorf("DefaultPageLines must be a positive integer, got %d", c.DefaultPageLines)
 	}
 
+	if c.DefaultHistorySize < 0 {
+		return fmt.Errorf("DefaultHistorySize must be zero or positive, got %d", c.DefaultHistorySize)
+	}
+
 	switch c.FilterMatchMode {
 	case "substring", "regex":
 	default:
@@ -266,6 +288,14 @@ func (c SystemConfig) validate() error {
 
 	if c.ElevationTimeout < 0 {
 		return fmt.Errorf("ElevationTimeout must be zero or positive, got %s", c.ElevationTimeout)
+	}
+
+	if c.ReauthGracePeriod < 0 {
+		return fmt.Errorf("ReauthGracePeriod must be zero or positive, got %s", c.ReauthGracePeriod)
+	}
+
+	if c.SuConfigTrustWindow < 0 {
+		return fmt.Errorf("SuConfigTrustWindow must be zero or positive, got %s", c.SuConfigTrustWindow)
 	}
 
 	// A rate limiter's AttemptWindow and LockoutDuration are only

@@ -1,0 +1,39 @@
+# This YAML file contains the commands for the "su-config" Command
+# Level, reached from the "exec" level with "su-config". See
+# tree_structure.yaml's own "su-config" entry, and var/tree/README.md's
+# su-config section, for what this level is for and how it differs from
+# an ordinary Command Level.
+
+commands:
+  show:
+    desc_key: show.desc
+    subcommands:
+      running-config:
+        desc_key: show.running_config.desc
+        pageable: true
+        run: show.running-config
+      startup-config:
+        desc_key: show.startup_config.desc
+        pageable: true
+        run: show.startup-config
+
+  copy:
+    desc_key: copy.desc
+    subcommands:
+      running-config:
+        desc_key: copy.running_config.desc
+        subcommands:
+          startup-config:
+            desc_key: copy.running_config.startup_config.desc
+            run: copy.running-config.startup-config
+
+  erase:
+    desc_key: erase.desc
+    subcommands:
+      startup-config:
+        desc_key: erase.startup_config.desc
+        run: erase.startup-config
+
+  exit-su-config:
+    desc_key: exit_su_config.desc
+    run: exit-su-config

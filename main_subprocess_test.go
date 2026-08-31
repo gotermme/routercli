@@ -32,8 +32,8 @@ import (
 // so nothing else in this package's own test suite also runs inside
 // it, precisely so that the several os.Exit calls scattered through
 // main and processCommandLineFlags, config.LoadSystemConfig failing,
-// --check-config, --version, --help, --hashpassword, --mfa, terminate
-// this disposable child process instead of the real "go test" run
+// --check-config, --version, --help, --hashpassword, terminate this
+// disposable child process instead of the real "go test" run
 // asserting on it. This is the same technique Go's own standard
 // library tests os/exec with, see exec_test.go's own TestHelperProcess,
 // for exactly the same reason, a function that legitimately calls
