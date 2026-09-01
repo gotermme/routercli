@@ -9,7 +9,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +22,7 @@ import (
 
 	"github.com/gotermme/routercli/auditlog"
 	"github.com/gotermme/routercli/auth"
-	_ "github.com/gotermme/routercli/cmd/core"
+	"github.com/gotermme/routercli/cmd/core"
 	"github.com/gotermme/routercli/cmd/product"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/completer"
@@ -196,6 +195,27 @@ func main() {
 		}
 		os.Exit(1)
 	}
+
+	// roles is a deployment's own declared set of role names, see
+	// command.LoadRoles's own doc comment for why a missing
+	// RolesFile is not itself an error. VerifyRoles then checks every
+	// allowed_roles reference across the whole tree against it, the
+	// same "run this once at startup, fail loudly" convention
+	// VerifyCommandLevels and VerifyVendorDefinedSecrets above already
+	// follow, and for the same reason: an unknown role name should
+	// fail the program immediately, not the first time a user actually
+	// hits the command it silently makes unreachable.
+	roles, err := command.LoadRoles(config.RolesFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to load roles manifest:", err)
+		os.Exit(1)
+	}
+	if problems := command.VerifyRoles(levels, roles); len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(os.Stderr, "%", p)
+		}
+		os.Exit(1)
+	}
 	warnPlaintextLevelSecrets(logger, levels)
 	warnPlaintextCommandSecrets(logger, levels)
 	if checkConfig {
@@ -237,6 +257,7 @@ func main() {
 		State:      &product.ProductState{},
 		Logger:     logger,
 		Levels:     levels,
+		Roles:      roles,
 		Audit:      audit,
 		Translator: translator,
 		// Seeded from the base level's own Name, PromptSuffix, and
@@ -294,6 +315,8 @@ func main() {
 		// UsersFile below, since it has a real default regardless of
 		// AuthRequired, see config.DefaultSystemConfig.
 		StartupConfigFile: config.StartupConfigFile,
+		RolesFile:         config.RolesFile,
+		DefaultsDir:       config.DefaultsDir,
 	}
 
 	// StartupConfigFile's own directory is created unconditionally,
@@ -301,7 +324,7 @@ func main() {
 	// regardless of whether a startup-config has ever actually been
 	// saved yet, since StartupConfigFile always has a real default,
 	// see the field's own assignment right above. This is not
-	// strictly required for loadStartupConfig below, a missing file
+	// strictly required for command.LoadStartupConfig below, a missing file
 	// is not an error either way, but it means the directory a first
 	// "copy running-config startup-config" needs is already there
 	// from the very first run, rather than only appearing the moment
@@ -311,21 +334,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// loadStartupConfig runs before establishSession, and before
+	// command.LoadStartupConfig runs before establishSession, and before
 	// anything below constructs the real, interactive readline loop,
 	// so a saved startup-config is applied to ctx.State the same way
 	// a real device applies its own saved configuration before
 	// anyone can log in at all, not gated behind who is about to
-	// connect. See loadStartupConfig's own doc comment for the full
+	// connect. See command.LoadStartupConfig's own doc comment for the full
 	// reasoning, including why this is safe to trust with no
 	// password prompting of its own.
-	if err := loadStartupConfig(ctx, ctx.StartupConfigFile); err != nil {
+	if err := command.LoadStartupConfig(ctx, ctx.StartupConfigFile); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to load startup-config:", err)
 		os.Exit(1)
 	}
 
 	// BannerMOTD, "message of the day," is shown unconditionally here,
-	// to every connection, right after loadStartupConfig above has
+	// to every connection, right after command.LoadStartupConfig above has
 	// replayed any saved "banner motd" line back into ctx.State, and
 	// before establishSession's own login prompt, if any, runs below.
 	// This matches real Cisco and HP, where a MOTD banner is about the
@@ -394,6 +417,34 @@ func main() {
 		}
 		session.CommandLevel = base.Name
 		ctx.Session = session
+
+		// A freshly created account, "account create" in the new admin
+		// Command Level, see cmd/core/cmd_admin.go, is forced straight
+		// into changing its password here, before anything else runs,
+		// whenever its own MustChangePassword flag is set, see
+		// auth.User.MustChangePassword's own doc comment. This only
+		// ever applies when EnableCLIAuthentication actually ran a real
+		// login above; a session resolved purely through
+		// EnableHostAuthentication never has a users.yaml password of
+		// its own to force a change on. If the change does not actually
+		// complete, core.RunPasswordChange's own retry budget exhausted
+		// with nothing changed for instance, the session is refused
+		// outright rather than silently continuing on with an account
+		// still carrying whatever placeholder credential is documented
+		// for the deployment, see etc/README.md's own roles section.
+		if config.EnableCLIAuthentication {
+			if u := ctx.Users[ctx.Session.Username]; u != nil && u.MustChangePassword {
+				fmt.Println(translator.T("auth.must_change_password"))
+				if err := core.RunPasswordChange(ctx, int(os.Stdin.Fd()), os.Stdout); err != nil {
+					fmt.Fprintln(os.Stderr, "failed to change password:", err)
+					os.Exit(1)
+				}
+				if u := ctx.Users[ctx.Session.Username]; u != nil && u.MustChangePassword {
+					fmt.Fprintln(os.Stderr, "%", translator.T("auth.must_change_password_failed"))
+					os.Exit(1)
+				}
+			}
+		}
 	}
 
 	// The SESSION START audit entry is written unconditionally here,
@@ -987,6 +1038,18 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				ctx.Audit.Log(username, line, false)
 				continue
 			}
+			// Checked next, before the password gate below, the same
+			// "cheapest, non-interactive check first" ordering
+			// command.EnterCommandLevel now follows for a Command
+			// Level's own AllowedRoles. See Command.AllowedRoles's own
+			// doc comment: this is independent of EffectivePasswordHash
+			// below, a command can carry either, both, or neither, and
+			// both are enforced when both are set.
+			if len(res.Command.AllowedRoles) > 0 && !command.Authorized(ctx, res.Command.AllowedRoles) {
+				fmt.Println("%", ctx.Translator.T("commandlevel.access_denied"))
+				ctx.Audit.Log(username, line, false)
+				continue
+			}
 			// Checked next, before ValidateArgs. See this function's
 			// own doc comment for why. It avoids leaking a password-
 			// gated command's argument shape requirements to a
@@ -1161,84 +1224,6 @@ func mkdirForFile(path string) error {
 		return nil
 	}
 	return os.MkdirAll(dir, 0750)
-}
-
-// loadStartupConfig reads path, AppContext.StartupConfigFile, and, if
-// it exists, replays its own text back into ctx.State the same way a
-// live session pasting that exact text back in would, through
-// command.ReplayLines, before establishSession or the interactive
-// readline loop below ever runs. A path that does not exist yet is
-// not an error, the same "no startup-config saved yet" treatment
-// show.startup-config's own handler in cmd/product already gives it;
-// a brand new deployment simply has nothing to load.
-//
-// This is what closes Framework Gap Roadmap item 1's last remaining
-// open piece, see claude/PROGRESS.md's own Phase 27 closing
-// paragraphs: a saved startup-config now really is applied again
-// after a process restart, not only ever a file sitting on disk
-// waiting for something to read it by hand.
-//
-// trusted is always passed as true to ReplayLines here: nothing has
-// typed a password yet, no Session even exists at the point main()
-// calls this function, well before establishSession runs. See
-// AppContext.ReplayingStartupConfig's own doc comment in
-// command/model.go for the full reasoning on why that is still safe
-// rather than a shortcut around any of this project's own pass the
-// hash reasoning; the trust here comes from this process already
-// having been allowed to run, and to read this file, by the
-// operating system itself, never from anything the file's own text
-// says.
-//
-// The whole replay runs inside paging.CaptureOutput, so the ordinary
-// confirmation text every replayed line's own handler prints,
-// "Hostname set to %s." for instance, never reaches a fresh process's
-// own terminal before anyone has even logged in, the same way a real
-// device's own boot sequence never echoes back every line of the
-// configuration it is loading either. Nothing is thrown away outright,
-// though: each captured line is logged at Debugln level instead, so
-// verbose troubleshooting, LogLevel turned up in etc/routercli.yaml,
-// can still see exactly what was applied.
-//
-// ctx.Position and ctx.Session.CommandLevel are both reset back to
-// the base level before this returns, success or failure, through a
-// deferred reset. Replaying "enable" and "configure terminal" style
-// lines necessarily walks ctx.Position deep into whatever Command
-// Levels the saved configuration touched, exec and config among them
-// in this project's own shipped tree, and that must never be what a
-// session about to log in, or about to start completely
-// unauthenticated when AuthRequired is off, actually starts from.
-// Every mutation this function's own replay makes to ctx.State
-// itself, and to any Command Level's own PasswordHash through a
-// replayed "password manager hash" line, is deliberately left in
-// place; only the navigation state this function itself used to get
-// there is undone.
-func loadStartupConfig(ctx *command.AppContext, path string) error {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	base := ctx.Levels.Base()
-	defer func() {
-		ctx.Position = command.NewCommandLevelStack(base.Name, base.PromptSuffix, base.Tree)
-		ctx.Session.CommandLevel = base.Name
-	}()
-
-	lines := strings.Split(string(data), "\n")
-	var replayErr error
-	captured, cerr := paging.CaptureOutput(func() {
-		replayErr = command.ReplayLines(ctx, lines, true)
-	})
-	if cerr != nil {
-		return cerr
-	}
-	for _, line := range captured {
-		ctx.Logger.Debugln("DEBUG: startup-config replay:", line)
-	}
-	return replayErr
 }
 
 // attachPasswordRateLimiters - This function walks every loaded

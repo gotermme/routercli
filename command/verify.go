@@ -144,3 +144,67 @@ func VerifyVendorDefinedSecrets(levels *TreeStructure) []error {
 
 	return problems
 }
+
+// VerifyRoles - This function checks a successfully loaded
+// TreeStructure's every AllowedRoles reference, on both a
+// CommandLevel and a Command, against roles, a deployment's own
+// loaded var/tree/roles.yaml, see LoadRoles. It runs from the same
+// places, and under the same --check-config flag, as
+// VerifyCommandLevels and VerifyVendorDefinedSecrets above. A role
+// name referenced in AllowedRoles that is not declared in roles.yaml
+// at all is a hard error, an unknown role could otherwise silently
+// gate a command that no real user could ever pass, discovered only
+// the first time someone actually tried it, exactly the class of
+// mistake this project's own configuration checker exists to catch
+// at startup instead.
+//
+// A nil roles, meaning roles.yaml did not exist at all, see
+// LoadRoles, still validates cleanly against a tree that never sets
+// AllowedRoles anywhere, and still fails loudly against one that
+// does, since there is then no declared role for any such reference
+// to possibly match.
+func VerifyRoles(levels *TreeStructure, roles *RoleSet) []error {
+	var problems []error
+
+	knownRole := func(name string) bool {
+		if roles == nil {
+			return false
+		}
+		_, ok := roles.ByName[name]
+		return ok
+	}
+
+	for _, level := range levels.Order {
+		for _, r := range level.AllowedRoles {
+			if !knownRole(r) {
+				problems = append(problems, fmt.Errorf("command level %q references role %q in allowed_roles, which is not declared in roles.yaml", level.Name, r))
+			}
+		}
+	}
+
+	visited := make(map[*Command]bool)
+	var walk2 func(path string, tree map[string]*Command)
+	walk2 = func(path string, tree map[string]*Command) {
+		for name, cmd := range tree {
+			if visited[cmd] {
+				continue
+			}
+			visited[cmd] = true
+			full := name
+			if path != "" {
+				full = path + " " + name
+			}
+			for _, r := range cmd.AllowedRoles {
+				if !knownRole(r) {
+					problems = append(problems, fmt.Errorf("command %q references role %q in allowed_roles, which is not declared in roles.yaml", full, r))
+				}
+			}
+			walk2(full, cmd.Subcommands)
+		}
+	}
+	for _, level := range levels.Order {
+		walk2("", level.Tree)
+	}
+
+	return problems
+}

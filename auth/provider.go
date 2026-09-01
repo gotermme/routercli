@@ -7,8 +7,6 @@ package auth
 
 import (
 	"fmt"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ----------------------------------------------------------------------
@@ -16,16 +14,22 @@ import (
 // ----------------------------------------------------------------------
 
 // Authenticate - This method implements AuthProvider for
-// LocalAuthProvider. A nonexistent username still runs a real bcrypt
-// comparison against dummyBcryptHash before returning, the same
-// timing side channel defense VerifyLogin has always performed, now
-// living here since this is the one place that actually knows whether
-// a username exists in this backend's own Users map. See
-// dummyBcryptHash's own doc comment in login.go.
+// LocalAuthProvider. A nonexistent username still runs a real
+// comparison, through whichever PasswordHasher is currently the
+// default, see PasswordHasher.Dummy in auth.go, before returning, the
+// same timing side channel defense VerifyLogin has always performed,
+// now living here since this is the one place that actually knows
+// whether a username exists in this backend's own Users map. Going
+// through the default hasher rather than calling bcrypt directly is
+// what keeps this defense correct even after a project calls
+// SetDefaultPasswordHasher to move away from bcrypt entirely; a fixed
+// bcrypt comparison here would burn the wrong amount of CPU time once
+// real logins are being checked against a different algorithm, quietly
+// reopening the exact timing side channel this exists to close.
 func (p *LocalAuthProvider) Authenticate(username, password string) (bool, error) {
 	u, ok := p.Users[username]
 	if !ok {
-		bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
+		defaultPasswordHasher.Verify(defaultPasswordHasher.Dummy(), password)
 		return false, nil
 	}
 	return VerifyPassword(u.PasswordHash, password), nil

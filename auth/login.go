@@ -18,10 +18,12 @@ import (
 	"golang.org/x/term"
 )
 
-// dummyBcryptHash - This constant is a fixed, valid bcrypt hash used
-// only to burn the same amount of CPU time a real password comparison
-// would, when LocalAuthProvider.Authenticate, see provider.go, hits a
-// nonexistent username. Its plaintext, "not-a-real-password", is
+// dummyBcryptHash - This constant is a fixed, valid bcrypt hash,
+// bcryptHasher's own Dummy method in auth.go returns its encoded half,
+// used only to burn the same amount of CPU time a real password
+// comparison would, when LocalAuthProvider.Authenticate, see
+// provider.go, hits a nonexistent username and bcrypt is still the
+// active default hasher. Its plaintext, "not-a-real-password", is
 // never compared against anything a real user could type. Only its
 // bcrypt cost factor matters here.
 const dummyBcryptHash = "$2a$10$C6UzMDM.H6dfI/f/IKcEeO4Sqzr4v4E4T0.E1TQhZY6NxN.0kQ8wa"

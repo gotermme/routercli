@@ -49,7 +49,7 @@ import (
 // treating a presented hash as proof that whoever pasted it actually
 // knows the password, is the same distinction
 // command.CommandLevel.LastAuthenticatedAt's own doc comment draws
-// out at length; see that field, and su-config, this project's
+// out at length; see that field, and admin, this project's
 // dedicated real, live authenticated Command Level for actually
 // replaying a whole saved configuration, for the rest of that
 // reasoning. A hash typed this way is never itself treated as a

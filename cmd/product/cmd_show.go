@@ -149,12 +149,12 @@ func runningConfigLines(ctx *command.AppContext, state *ProductState) []string {
 // the same secret without ever exposing, or needing to know, the real
 // plaintext password. A level's own VendorDefinedPasswordHash renders
 // this same way only while the current session is somewhere with
-// RevealVendorDefinedSecrets set, su-config being the one level in
+// RevealVendorDefinedSecrets set, admin being the one level in
 // this project's own shipped tree that sets it; everywhere else it
 // renders as the "<HIDDEN>" placeholder instead. See
 // currentLevelRevealsVendorDefinedSecrets below.
 //
-// This block is still a known, separate limitation, one su-config
+// This block is still a known, separate limitation, one admin
 // does not solve either: every level's own line is emitted together,
 // in one flat list, right after "configure terminal", rather than
 // each positioned inside a paste sequence that actually reenters that
@@ -163,7 +163,7 @@ func runningConfigLines(ctx *command.AppContext, state *ProductState) []string {
 // while it runs, see that command's own doc comment, so this block,
 // pasted back in as is, would only ever affect the level a session is
 // actually sitting in at the time, not each named level individually.
-// su-config's own GrantsReplayTrust solves a different problem,
+// admin's own GrantsReplayTrust solves a different problem,
 // whether entering a gated level during a paste needs a fresh prompt
 // at all, not which level a "password manager hash" line inside that
 // paste actually targets. Getting every line positioned correctly
@@ -187,7 +187,7 @@ func configModeLines(ctx *command.AppContext, state *ProductState) []string {
 	// value, while an ordinary, user settable secret renders in full.
 	// reveal is decided once, by which Command Level this session is
 	// actually sitting in right now, not per rendered level, since
-	// su-config's whole point is a session that already proved a
+	// admin's whole point is a session that already proved a
 	// real, live credential there gets to see everything, not a
 	// selective peek at one level at a time; see
 	// currentLevelRevealsVendorDefinedSecrets and
@@ -246,11 +246,11 @@ func configModeLines(ctx *command.AppContext, state *ProductState) []string {
 
 // currentLevelRevealsVendorDefinedSecrets - This function reports
 // whether ctx.Session.CommandLevel currently names a Command Level
-// whose own RevealVendorDefinedSecrets is true, su-config being the
+// whose own RevealVendorDefinedSecrets is true, admin being the
 // one level in this project's own shipped tree that sets it, see
 // var/tree/tree_structure.yaml. This reads a property off the current
 // level rather than comparing ctx.Session.CommandLevel against a
-// hardcoded "su-config" literal, the same generic,
+// hardcoded "admin" literal, the same generic,
 // read-a-property-rather-than-hardcode-a-level-name approach
 // command.CommandLevel.RevealVendorDefinedSecrets's own doc comment
 // describes, so a project renaming or restructuring its own version
@@ -295,9 +295,9 @@ func configEnterWords(ctx *command.AppContext) ([]string, bool) {
 // running-config startup-config" is the one caller that does need
 // this, prepending it to what actually gets written to
 // StartupConfigFile, since a fresh process replaying that file back
-// in at boot, see main.go's own loadStartupConfig, starts completely
-// cold, at base, with nobody having typed "enable" by hand first the
-// way an interactive paste always assumes.
+// in at boot, see command.LoadStartupConfig, starts completely cold,
+// at base, with nobody having typed "enable" by hand first the way an
+// interactive paste always assumes.
 func execEnterWords(ctx *command.AppContext) ([]string, bool) {
 	return levelEnterWords(ctx, "exec")
 }

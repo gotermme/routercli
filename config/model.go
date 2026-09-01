@@ -205,6 +205,23 @@ type SystemConfig struct {
 	// wants Pageable output but no pipe filtering exposed at the
 	// command line at all. validate rejects a negative value.
 	MaxFilterChainDepth int `yaml:"MaxFilterChainDepth"`
+
+	// RolesFile is where a deployment declares which role names exist
+	// for use with a Command or CommandLevel's own allowed_roles list,
+	// see command.LoadRoles. A missing file is not an error, and
+	// simply means this deployment never uses AllowedRoles at all, see
+	// RoleSet's own doc comment.
+	RolesFile string `yaml:"RolesFile"`
+
+	// DefaultsDir is the directory holding this deployment's own
+	// factory default files, at minimum a skeleton UsersFile seeded
+	// with one bootstrap account holding the bypass role, see
+	// var/tree/README.md's own roles section. "erase users" and
+	// "restore-factory-defaults", both in the new admin Command Level,
+	// see cmd/core/cmd_admin.go, copy from here, matched to the live
+	// file's own base name, rather than deleting a file to nothing the
+	// way "erase startup-config" always has.
+	DefaultsDir string `yaml:"DefaultsDir"`
 }
 
 // AuthProviderConfig - This type is one entry in SystemConfig's own

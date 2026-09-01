@@ -13,14 +13,19 @@ import (
 
 // init - This function registers "diagnostic-mode" and
 // "exit-diagnostic-mode", the diagnostic Command Level's own entry
-// and exit commands. See var/tree/tree_structure.yaml's "diagnostic"
-// entry. This is the same shape as cmd_enable.go. See that file's own
-// doc comment for why this is an entirely ordinary command file, with
-// nothing special cased in package command about "diagnostic" as a
-// name. cmd_diagnostic.go, note the different filename, registers
-// "self-test", a command reachable from inside diagnostic mode, a
-// different thing entirely from entering or leaving diagnostic mode,
-// which is this file's job.
+// and exit commands, by their internal registered names. See
+// var/tree/tree_structure.yaml's "diagnostic" entry. The word a
+// session actually types to leave, "return", is decided entirely by
+// var/tree/level_diagnostic.yaml's own tree, whose "return" entry
+// points its own "run:" at this same registered "exit-diagnostic-mode"
+// name; nothing here needed to change when that word did, see that
+// file's own doc comment. This is the same shape as cmd_enable.go.
+// See that file's own doc comment for why this is an entirely
+// ordinary command file, with nothing special cased in package
+// command about "diagnostic" as a name. cmd_diagnostic.go, note the
+// different filename, registers "self-test", a command reachable from
+// inside diagnostic mode, a different thing entirely from entering or
+// leaving diagnostic mode, which is this file's job.
 func init() {
 	command.Register("diagnostic-mode", func(ctx *command.AppContext, args []string) error {
 		level := ctx.Levels.ByName["diagnostic"]

@@ -305,7 +305,7 @@ func withinReauthGracePeriod(ctx *AppContext, level *CommandLevel) bool {
 // see that field's own doc comment in model.go. What this function
 // adds on top is scope, not a weaker kind of proof: one such real
 // check, at a level built specifically to require one,
-// var/tree/README.md's own su-config for instance, is trusted widely
+// var/tree/README.md's own admin for instance, is trusted widely
 // enough to also waive every other level's own prompt for a bounded
 // window afterward, so a whole saved configuration can be pasted back
 // in and reproduce the exact same access it had before without
@@ -382,6 +382,20 @@ func EnterCommandLevel(ctx *AppContext, level, parent *CommandLevel) (entered bo
 	if err := RequireCurrentCommandLevel(ctx, level.Name, level.Parent); err != nil {
 		return false, err
 	}
+	// The role gate is checked before the password gate below, and
+	// before ever prompting, the same "do not invite a session to try
+	// at all" reasoning the rate limit check inside the default case
+	// below already follows. ReplayingStartupConfig waives this the
+	// same way it waives the password gate right below it: nobody has
+	// typed anything at all yet during boot time replay, no Session
+	// even exists, so there is no logged in user's own roles to check
+	// in the first place. See AppContext.ReplayingStartupConfig's own
+	// doc comment. AllowedRoles and PasswordHash are independent
+	// gates, see Command.AllowedRoles's own doc comment; both are
+	// enforced when both are set on the same level.
+	if !ctx.ReplayingStartupConfig && len(level.AllowedRoles) > 0 && !Authorized(ctx, level.AllowedRoles) {
+		return false, fmt.Errorf("%s", ctx.Translator.T("commandlevel.access_denied"))
+	}
 	switch effectiveHash := level.EffectivePasswordHash(); {
 	case ctx.ReplayingStartupConfig:
 		// Trusted boot time replay, see AppContext.ReplayingStartupConfig's
@@ -409,11 +423,11 @@ func EnterCommandLevel(ctx *AppContext, level, parent *CommandLevel) (entered bo
 		// counting down from the first prompt.
 		level.LastAuthenticatedAt = time.Now()
 	case withinSuConfigTrust(ctx):
-		// Granted through su-config's own recent, real, live
-		// credential check, see withinSuConfigTrust below, not
-		// through anything at this level itself. Deliberately does
-		// NOT set level.LastAuthenticatedAt: nobody actually proved
-		// this level's own credential, only su-config's, and letting
+		// Granted through admin's own recent, real, live credential
+		// check, see withinSuConfigTrust below, not through anything
+		// at this level itself. Deliberately does NOT set
+		// level.LastAuthenticatedAt: nobody actually proved this
+		// level's own credential, only admin's, and letting
 		// this branch mark this level as if it had been would falsely
 		// let a later, ordinary reentry skip the prompt through
 		// withinReauthGracePeriod once SuConfigTrustWindow itself has

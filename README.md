@@ -154,7 +154,9 @@ command/       The framework core: Command, Resolve(), ValidateArgs(),
                HelpText(), the plugin registry, CommandLevelStack, the
                YAML tree loader, and the Tree Structure / Command Level
                system (CommandLevel, LoadTreeStructure,
-               EnterCommandLevel/ExitCommandLevel, VerifyCommandLevels)
+               EnterCommandLevel/ExitCommandLevel, VerifyCommandLevels);
+               also role based access control (RoleSet, LoadRoles,
+               VerifyRoles, Authorized)
 
 completer/     Tab completion and the interactive "?" contextual help
                (readline Listener, not readline's own AutoComplete, which
@@ -188,15 +190,19 @@ cmd/product/   The Cisco and HP flavored demonstration commands this
                same way, one file per command self-registering through
                init(). Meant to be read, copied, and replaced.
 
-var/tree/      The Tree Structure manifest (tree_structure.yaml) and
-               each Command Level's own command tree (level_*.yaml).
+var/tree/      The Tree Structure manifest (tree_structure.yaml), each
+               Command Level's own command tree (level_*.yaml), and the
+               role declaration manifest (roles.yaml)
 
 var/lang/      The language catalog, one YAML file per language
 
 var/log/       System, history, and audit logs
 
-etc/           The main configuration file (routercli.yaml) and the
-               multi-user database (users.yaml)
+etc/           The main configuration file (routercli.yaml), the
+               multi-user database (users.yaml), and, under
+               etc/defaults/, factory default skeleton copies of both
+               UsersFile and RolesFile, restored by "erase users" and
+               "restore-factory-defaults"
 ```
 
 ## Building your own CLI on top of this
@@ -648,7 +654,118 @@ correctness at all. `watchTerminalResize` in `main.go` is the one call
 site, started once at session start and stopped, through its own
 returned `stop` function, before the process exits.
 
-## 13. Testing
+### 13. Roles, the admin Command Level, and account management
+
+RouterCLI's role based access control lets a Command or a Command Level
+declare which named roles may reach it, `allowed_roles` in the tree YAML,
+checked against whichever roles the currently logged in account holds.
+This is a separate, independent gate from `password_hash`. A Command or
+Command Level MAY set either, both, or neither, and both are enforced
+when both are set.
+
+```yaml
+# var/tree/roles.yaml
+roles:
+  admin:
+    desc: "Full administrative access"
+    bypass: true
+  operator:
+    desc: "Read only access to most commands"
+```
+
+Roles are flat and unordered by design, not a numbered hierarchy the way
+Cisco's own privilege levels are. An account MAY hold more than one role,
+set in `etc/users.yaml`:
+
+```yaml
+users:
+  alice:
+    password: "$6$..."
+    roles: [operator]
+```
+
+A Command or a Command Level gates access to whichever roles it names:
+
+```yaml
+# var/tree/tree_structure.yaml
+admin:
+  allowed_roles: [admin]
+```
+
+Access is granted on any overlap at all between the two lists, never on
+rank. An account holding none of a gate's own named roles is refused, the
+same deny by default convention `password_hash` already follows for a
+wrong or missing credential. `RolesFile` in `etc/routercli.yaml`, `var/tree/roles.yaml`
+by default, is where a deployment declares which role names exist at all;
+a Command or a Command Level referencing a name not declared there is a
+hard startup error, the same fail loudly convention this project applies
+throughout. A deployment that never needs role based access control at
+all MAY delete `RolesFile` entirely; a missing `RolesFile` is not an
+error, and simply means no Command or Command Level anywhere may set
+`allowed_roles`.
+
+At most one role across the whole manifest MAY set `bypass: true`. An
+account holding that one reserved role automatically passes every
+`allowed_roles` check anywhere in the tree, regardless of what that
+check's own list actually contains. This exists to solve the bootstrap
+problem: the very first account a deployment ever seeds needs some way
+to reach the level that assigns roles to everyone else in the first
+place, before any ordinary role exists to grant it that access.
+
+The shipped example ships exactly one Command Level gated this way, `admin`,
+reached from `exec` with `admin`, left with `return`. It replaces what
+earlier phases called `su-config`; its own `show running-config`, `show
+startup-config`, `copy running-config startup-config`, and `erase
+startup-config` commands moved here unchanged. `admin` also carries this
+deployment's own account management commands, under the word `account`,
+deliberately chosen to avoid confusion with the existing self service
+`user` Command Level:
+
+```
+router(admin)# account create bob
+router(admin)# account create carol generate
+router(admin)# account create dave hash $6$$2a$10$...
+router(admin)# account roles add bob operator
+router(admin)# account roles remove bob operator
+router(admin)# account delete bob
+```
+
+`account create <username>` alone prompts interactively, masked, twice,
+for the new account's first password, the same flow `password change`
+already uses, so a real password never ends up typed on the command line
+or written to the audit log. `account create <username> generate`
+auto-generates a password meeting this deployment's own configured
+password policy instead, printed once, the only time it is ever shown in
+plain text. `account create <username> hash <hash>` imports an
+already-computed hash directly, never a plaintext password, for bulk
+resets or preloading identical accounts across many devices. The first
+two forms set a new `must_change_password` flag on the account, forcing
+whoever logs in with it straight into changing the password before
+anything else runs; the third does not, since an imported hash is
+presumed to already be the real intended credential. `account delete`,
+and `account roles remove` when removing the reserved bypass role,
+refuses when the target is the last account left holding it, closing off
+a deployment locking itself out of `admin` entirely with no way back.
+
+Recovering from that lockout anyway, however it happened, is what
+`restore-factory-defaults` is for. `etc/defaults/` holds skeleton copies
+of `UsersFile` and `RolesFile`, restored over the live files by
+`restore-factory-defaults`, and, separately, by `erase users`, which
+restores `UsersFile` alone rather than deleting it to nothing the way
+`erase startup-config` safely can: an empty user database would
+permanently lock every account, the bypass role included, out of the
+whole deployment. `restore-factory-defaults` additionally erases
+`startup-config` and then reloads, the same as running `reload` on its
+own. `reload` rereads `UsersFile`, `RolesFile`, and `startup-config`
+fresh from disk, rebuilds the current session's own in memory state from
+them, and ends the connection, forcing whoever ran it to reconnect.
+RouterCLI is one process per connection today, with no persistent daemon
+behind it, so `reload` cannot affect any other already connected
+session. Multi-session awareness, and the daemon architecture true
+multi-session support would need, is future work, not something this
+project has built yet.
+
+## 14. Testing
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -670,7 +787,7 @@ editing it, run `./routercli --check-config`. It loads and verifies the Tree
 Structure without starting the interactive loop, and is worth running as part
 of the same routine.
 
-## 14. Code execution logic
+## 15. Code execution logic
 
 1. `main.go` runs.
 2. Every `init()` in `cmd/core` and `cmd/product` runs. This happens
@@ -690,6 +807,12 @@ of the same routine.
    declared `enter_command` and `exit_command` actually corresponds to a
    registered command. This is the same check whether running normally or
    through `--check-config`. A broken manifest fails loudly here, either way.
-6. If `--check-config` was passed, `main.go` prints the result and exits
+6. `main.go` calls `command.LoadRoles` and `command.VerifyRoles`,
+   confirming every `allowed_roles` reference anywhere in the tree names a
+   role actually declared in `RolesFile`. A missing `RolesFile` is not
+   itself an error, see section 13 above; a broken one, or a dangling
+   `allowed_roles` reference, fails loudly here the same as a broken Tree
+   Structure does.
+7. If `--check-config` was passed, `main.go` prints the result and exits
    without starting the interactive loop. Otherwise, it builds the session
    and enters the read, resolve, validate, and dispatch loop.

@@ -1322,6 +1322,168 @@ func TestEnterCommandLevelRefusesFromWrongParent(t *testing.T) {
 
 // ----------------------------------------------------------------------
 //
+// EnterCommandLevel, AllowedRoles
+//
+// ----------------------------------------------------------------------
+
+// rolesLevelFixture - This function builds a two level chain, base
+// "operator" and root swap "exec", where exec's own AllowedRoles is
+// set to allowed, for the AllowedRoles tests below.
+func rolesLevelFixture(t *testing.T, allowed []string) *TreeStructure {
+	t.Helper()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	execTree := writeTree(t, "  configure:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	allowedYAML := "["
+	for i, r := range allowed {
+		if i > 0 {
+			allowedYAML += ", "
+		}
+		allowedYAML += r
+	}
+	allowedYAML += "]"
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+    allowed_roles: `+allowedYAML+`
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+	return levels
+}
+
+// TestEnterCommandLevelDeniesWithoutMatchingRole - This test verifies
+// that a level carrying AllowedRoles refuses a session holding no
+// role in that list, the deny by default convention Authorized itself
+// documents, checked independently of, and before, any PasswordHash
+// this level might also carry.
+func TestEnterCommandLevelDeniesWithoutMatchingRole(t *testing.T) {
+	registerTestHandlers()
+	levels := rolesLevelFixture(t, []string{"admin"})
+	ctx := testContext(t, levels, "operator")
+	ctx.Session.Authenticated = true
+	ctx.Session.Username = "alice"
+	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"operator"}}}
+
+	entered, err := EnterCommandLevel(ctx, levels.ByName["exec"], levels.ByName["operator"])
+	if err == nil {
+		t.Fatal("expected an error entering a role gated level without a matching role")
+	}
+	if entered {
+		t.Error("expected entered=false on a role gated refusal")
+	}
+	if ctx.Session.CommandLevel != "operator" {
+		t.Errorf("Session.CommandLevel should be unchanged after a role gated refusal, got %q", ctx.Session.CommandLevel)
+	}
+}
+
+// TestEnterCommandLevelGrantsWithMatchingRole - This test verifies
+// that a session holding one of AllowedRoles enters cleanly, with no
+// password configured on the level at all.
+func TestEnterCommandLevelGrantsWithMatchingRole(t *testing.T) {
+	registerTestHandlers()
+	levels := rolesLevelFixture(t, []string{"admin"})
+	ctx := testContext(t, levels, "operator")
+	ctx.Session.Authenticated = true
+	ctx.Session.Username = "alice"
+	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}
+
+	entered, err := EnterCommandLevel(ctx, levels.ByName["exec"], levels.ByName["operator"])
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true for a session holding an allowed role")
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "exec")
+	}
+}
+
+// TestEnterCommandLevelGrantsViaBypassRole - This test verifies that
+// a session holding the deployment's own bypass role enters a role
+// gated level regardless of what AllowedRoles actually contains, the
+// bootstrap mechanism, see RoleSet.BypassRole's own doc comment.
+func TestEnterCommandLevelGrantsViaBypassRole(t *testing.T) {
+	registerTestHandlers()
+	levels := rolesLevelFixture(t, []string{"some-other-role"})
+	ctx := testContext(t, levels, "operator")
+	ctx.Session.Authenticated = true
+	ctx.Session.Username = "alice"
+	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}
+	ctx.Roles = &RoleSet{BypassRole: "admin"}
+
+	entered, err := EnterCommandLevel(ctx, levels.ByName["exec"], levels.ByName["operator"])
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true for a session holding the bypass role")
+	}
+}
+
+// TestEnterCommandLevelRoleGateWaivedDuringReplay - This test
+// verifies that ctx.ReplayingStartupConfig waives the role gate the
+// same way it waives the password gate, since boot time replay has no
+// Session, and so no logged in user's own roles to check at all, see
+// AppContext.ReplayingStartupConfig's own doc comment.
+func TestEnterCommandLevelRoleGateWaivedDuringReplay(t *testing.T) {
+	registerTestHandlers()
+	levels := rolesLevelFixture(t, []string{"admin"})
+	ctx := testContext(t, levels, "operator")
+	ctx.ReplayingStartupConfig = true
+	// Deliberately no Session.Authenticated, no Users, no Roles at
+	// all: an ordinary session in this state would be denied outright.
+
+	entered, err := EnterCommandLevel(ctx, levels.ByName["exec"], levels.ByName["operator"])
+	if err != nil {
+		t.Fatalf("EnterCommandLevel returned unexpected error during replay: %v", err)
+	}
+	if !entered {
+		t.Error("expected entered=true during replay despite AllowedRoles being set and nobody logged in")
+	}
+}
+
+// TestEnterCommandLevelRoleGateIndependentOfPassword - This test
+// verifies that AllowedRoles and PasswordHash are independent gates,
+// both enforced when both are set: a session holding the right role
+// still must satisfy the level's own password too.
+func TestEnterCommandLevelRoleGateIndependentOfPassword(t *testing.T) {
+	registerTestHandlers()
+	levels := rolesLevelFixture(t, []string{"admin"})
+	exec := levels.ByName["exec"]
+	hash, err := auth.HashPassword("correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+	exec.PasswordHash = hash
+
+	ctx := testContext(t, levels, "operator")
+	ctx.Session.Authenticated = true
+	ctx.Session.Username = "alice"
+	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}
+
+	// The role check passes, but auth.PromptSecret will fail to read a
+	// real password from this non-interactive test environment, so
+	// this must still fail, not silently succeed just because the
+	// role check already passed.
+	entered, err := EnterCommandLevel(ctx, exec, levels.ByName["operator"])
+	if err == nil {
+		t.Fatal("expected an error: the role check passing must not bypass the level's own separate password check")
+	}
+	if entered {
+		t.Error("expected entered=false when the password check still fails despite a matching role")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
 // TreeStructure.Base()
 //
 // ----------------------------------------------------------------------

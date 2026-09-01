@@ -127,7 +127,7 @@ a session past a fresh password prompt for entering a completely different
 gated level, as long as that other entry happens within
 `SuConfigTrustWindow`, an `etc/routercli.yaml` setting described in
 `etc/README.md`. The one level this project ships with `grants_replay_trust`
-set is `su-config`, see `var/tree/tree_structure.yaml`, built to let a whole
+set is `admin`, see `var/tree/tree_structure.yaml`, built to let a whole
 saved configuration be pasted back into a fresh session without stopping at
 a fresh prompt every time the pasted text moves into another gated level.
 Nothing about this property makes anything inside pasted or replayed text
@@ -137,10 +137,12 @@ level carrying this property; entering some other level under that trust
 never marks that other level's own `LastAuthenticatedAt`, so the trust
 never chains any further than the one level that actually earned it. A
 level shipped with neither `password_hash` nor `vendor_defined_password_hash`
-set, `su-config`'s own shipped default, never has anything to check on
+set, `admin`'s own shipped default, never has anything to check on
 entry, so it never sets `LastAuthenticatedAt` either, and `grants_replay_trust`
 quietly grants nothing at all until a real password is configured for it.
-See `command.CommandLevel`'s own doc comment, and `command.EnterCommandLevel`
+`admin` is gated instead by `allowed_roles`, a separate, independent
+mechanism, see this file's own roles section below. See
+`command.CommandLevel`'s own doc comment, and `command.EnterCommandLevel`
 in `command/treestructure.go`, for the full mechanism.
 
 #### `reveal_vendor_defined_secrets`
@@ -148,13 +150,27 @@ in `command/treestructure.go`, for the full mechanism.
 This property, a boolean defaulting to `false`, marks a Command Level as one
 where `show running-config` may print a real `vendor_defined_password_hash`
 in full rather than the `<HIDDEN>` placeholder it renders everywhere else.
-`su-config` is the one level in this project's own shipped tree that sets
+`admin` is the one level in this project's own shipped tree that sets
 this. This property is read generically by whatever renders configuration
 output, never hard coded against a level name, so a product renaming or
 restructuring its own version of this level never needs to touch that
 rendering code, only this one property on whichever level should carry it.
 See `cmd/product/cmd_show.go`'s own `currentLevelRevealsVendorDefinedSecrets`
 function for exactly how this is read.
+
+#### `allowed_roles`
+
+This property, an optional list of role names, gates entry to this Command
+Level's own `enter_command` to whichever role in `RolesFile`, see this
+file's own roles section below, holds one of the names listed here. Empty by
+default, meaning this property gates nothing at all. This is a separate,
+independent gate from `password_hash`, checked at the same point, right
+after `RequireCurrentCommandLevel`, and before the password check. A
+Command Level MAY set either, both, or neither, and both are enforced when
+both are set. `admin`, the one level this project ships with
+`allowed_roles` set, is gated to this deployment's own reserved bypass
+role, see the roles section below, so only the account seeded with that
+role can reach it out of the box.
 
 #### `prompt_suffix`
 
@@ -280,6 +296,17 @@ command carrying `vendor_defined_password_hash` MUST NOT set this to
 `true`, see that property's own entry above for the validation rule and
 why.
 
+#### `allowed_roles`
+
+This property, an optional list of role names, gates running this specific
+command to whichever role in `RolesFile`, see this file's own roles
+section below, holds one of the names listed here. Empty by default,
+meaning this property gates nothing at all. This is the Command
+counterpart to a Command Level's own `allowed_roles` above, checked in
+`main.go`'s own dispatch loop at the same point `password_hash` above is
+already checked, and independent of it the same way: a command MAY set
+either, both, or neither, and both are enforced when both are set.
+
 #### `minargs`
 
 This property sets the minimum number of arguments this command requires,
@@ -345,6 +372,62 @@ the full picture, and `etc/README.md` for the related `PagingEnabled`,
 #### `subcommands`
 
 This property lists the nested subcommands reachable from this command.
+
+
+## Roles
+
+`RolesFile`, `var/tree/roles.yaml` by default, is where a deployment
+declares every role name it recognizes, for use in a Command or Command
+Level's own `allowed_roles` list elsewhere in `var/tree/`.
+
+```yaml
+# var/tree/roles.yaml
+roles:
+  admin:
+    desc: "Full administrative access"
+    bypass: true
+  operator:
+    desc: "Read only access to most commands"
+```
+
+#### `desc`
+
+A short, human readable description of what this role is for. Purely
+documentation; nothing in package `command` itself reads it.
+
+#### `bypass`
+
+A boolean, `false` by default. At most one role across the whole manifest
+MAY set this `true`; a manifest setting it on more than one role is a hard
+startup error. An account holding this one reserved role automatically
+passes every `allowed_roles` check, on any Command or Command Level,
+regardless of what that check's own list actually contains. This is what
+lets a deployment's very first seeded account, see `etc/README.md`'s own
+factory defaults section, reach the `admin` Command Level and start
+assigning ordinary roles to everyone else, before any ordinary role exists
+to grant it that access in the first place.
+
+Roles are flat and unordered by design, not a numbered hierarchy the way
+Cisco's own privilege levels are. An account MAY hold more than one role,
+set through `account roles add` and `account roles remove` in the `admin`
+Command Level, never by hand editing `UsersFile` directly. Access through
+`allowed_roles` is granted on any overlap at all between the roles an
+account holds and the roles a Command or Command Level names, never on
+rank; there is no concept of one role outranking another.
+
+A deployment that never needs role based access control at all MAY delete
+`RolesFile` entirely; a missing `RolesFile` is not an error, and simply
+means no Command or Command Level anywhere may set `allowed_roles`, since
+there would be nothing left to validate a name against. A Command or
+Command Level referencing a role name not actually declared in `RolesFile`
+is a hard startup error, `command.VerifyRoles`, the same fail loudly
+convention `command.VerifyCommandLevels` and
+`command.VerifyVendorDefinedSecrets` already follow for a broken manifest.
+
+See `README.md`'s own section on roles, the `admin` Command Level, and
+account management for the full account command reference, and
+`etc/README.md`'s own factory defaults section for how a deployment
+recovers if every account holding the bypass role is ever lost.
 
 
 ## Commands

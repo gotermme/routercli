@@ -6,9 +6,12 @@
 package command
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/gotermme/routercli/paging"
 	"github.com/gotermme/routercli/tokenize"
 )
 
@@ -97,4 +100,72 @@ func ReplayLines(ctx *AppContext, lines []string, trusted bool) error {
 		}
 	}
 	return nil
+}
+
+// LoadStartupConfig reads path, a saved startup-config file, and, if
+// it exists, replays its own text back into ctx.State the same way a
+// live session pasting that exact text back in would, through
+// ReplayLines above, with trusted always true: nothing has typed a
+// password yet, no real credential check is being bypassed, only
+// waived, the same reasoning AppContext.ReplayingStartupConfig's own
+// doc comment gives in full. A path that does not exist yet is not an
+// error; there is simply nothing saved to load.
+//
+// This is called from two places: main.go, once, at process startup,
+// before establishSession or the interactive readline loop ever
+// begins, and cmd/core/cmd_admin.go's "reload" command, which calls
+// this again, mid-session, as part of re-reading every persistent
+// file fresh from disk before ending the connection, see that
+// command's own doc comment for why re-validating startup-config this
+// way, even though nothing further in a dying session actually reads
+// the result, still catches a startup-config a hand edit broke before
+// the next real connection would otherwise be the first to discover
+// it.
+//
+// ctx.Position and ctx.Session.CommandLevel are both reset back to
+// the base level before this returns, success or failure, through a
+// deferred reset, since replaying "enable" and "configure terminal"
+// style lines necessarily walks ctx.Position deep into whatever
+// Command Levels the saved configuration touched, and that must never
+// be where a session about to log in, or a session about to end right
+// after "reload", is actually left sitting. Every mutation this
+// function's own replay makes to ctx.State itself, and to any Command
+// Level's own PasswordHash through a replayed "password manager hash"
+// line, is deliberately left in place; only the navigation state this
+// function itself used to get there is undone.
+//
+// The whole replay runs inside paging.CaptureOutput, so the ordinary
+// confirmation text every replayed line's own handler prints never
+// reaches a terminal nobody has actually asked to see it on, whether
+// that is a fresh process nobody has logged into yet, or an
+// interactive session mid-command running "reload". Each captured
+// line is logged at Debugln level instead, so verbose troubleshooting
+// can still see exactly what was applied.
+func LoadStartupConfig(ctx *AppContext, path string) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	base := ctx.Levels.Base()
+	defer func() {
+		ctx.Position = NewCommandLevelStack(base.Name, base.PromptSuffix, base.Tree)
+		ctx.Session.CommandLevel = base.Name
+	}()
+
+	lines := strings.Split(string(data), "\n")
+	var replayErr error
+	captured, cerr := paging.CaptureOutput(func() {
+		replayErr = ReplayLines(ctx, lines, true)
+	})
+	if cerr != nil {
+		return cerr
+	}
+	for _, line := range captured {
+		ctx.Logger.Debugln("DEBUG: startup-config replay:", line)
+	}
+	return replayErr
 }

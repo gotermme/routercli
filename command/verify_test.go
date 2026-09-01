@@ -388,3 +388,167 @@ func TestVerifyVendorDefinedSecretsDedupesSharedCommand(t *testing.T) {
 		t.Fatalf("expected exactly 1 problem, a shared command reported once regardless of how many levels reach it, got %d: %v", len(problems), problems)
 	}
 }
+
+// ----------------------------------------------------------------------
+// VerifyRoles
+// ----------------------------------------------------------------------
+
+// TestVerifyRolesPassesWhenNoneReferenced - This test verifies that a
+// tree setting no allowed_roles anywhere, the state of every existing
+// tree file in this project before AllowedRoles existed at all,
+// produces no problems, even with a nil RoleSet.
+func TestVerifyRolesPassesWhenNoneReferenced(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	if problems := VerifyRoles(levels, nil); len(problems) != 0 {
+		t.Errorf("expected no problems, got %v", problems)
+	}
+}
+
+// TestVerifyRolesPassesWhenEveryReferenceIsDeclared - This test
+// verifies that a CommandLevel and a Command, each setting
+// allowed_roles to a role that is actually declared in the RoleSet,
+// produce no problems.
+func TestVerifyRolesPassesWhenEveryReferenceIsDeclared(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n    allowed_roles: [operator]\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+    allowed_roles: [admin]
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	roles := &RoleSet{ByName: map[string]*Role{
+		"admin":    {Name: "admin", Bypass: true},
+		"operator": {Name: "operator"},
+	}}
+
+	if problems := VerifyRoles(levels, roles); len(problems) != 0 {
+		t.Errorf("expected no problems, got %v", problems)
+	}
+}
+
+// TestVerifyRolesCatchesUnknownLevelRole - This test verifies that a
+// CommandLevel's own allowed_roles referencing a role not declared in
+// roles.yaml is caught, rather than silently accepted and left to
+// never match any real user's own roles.
+func TestVerifyRolesCatchesUnknownLevelRole(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+    allowed_roles: [ghost-role]
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	problems := VerifyRoles(levels, &RoleSet{ByName: map[string]*Role{}})
+	if len(problems) != 1 {
+		t.Fatalf("expected exactly 1 problem for an unknown level role, got %d: %v", len(problems), problems)
+	}
+}
+
+// TestVerifyRolesCatchesUnknownCommandRole - This test verifies that
+// a Command's own allowed_roles referencing an undeclared role is
+// caught the same way a level's own is.
+func TestVerifyRolesCatchesUnknownCommandRole(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n    allowed_roles: [ghost-role]\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	problems := VerifyRoles(levels, &RoleSet{ByName: map[string]*Role{}})
+	if len(problems) != 1 {
+		t.Fatalf("expected exactly 1 problem for an unknown command role, got %d: %v", len(problems), problems)
+	}
+}
+
+// TestVerifyRolesCatchesUnknownRoleWithNilRoleSet - This test
+// verifies that a nil RoleSet, a deployment with no RolesFile at all,
+// still catches an allowed_roles reference somewhere in the tree,
+// since there is nothing at all for such a reference to be validated
+// against.
+func TestVerifyRolesCatchesUnknownRoleWithNilRoleSet(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+    allowed_roles: [admin]
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	problems := VerifyRoles(levels, nil)
+	if len(problems) != 1 {
+		t.Fatalf("expected exactly 1 problem with a nil RoleSet and a real allowed_roles reference, got %d: %v", len(problems), problems)
+	}
+}
+
+// TestVerifyRolesDedupesSharedCommand - This test verifies that a
+// Command reachable from more than one CommandLevel, through
+// inherit_parent, is only reported once for an unknown role, matching
+// VerifyVendorDefinedSecrets' own dedupe behavior.
+func TestVerifyRolesDedupesSharedCommand(t *testing.T) {
+	registerTestHandlers()
+	opTree := writeTree(t, "  show:\n    run: test.noop\n    allowed_roles: [ghost-role]\n")
+	execTree := writeTree(t, "  hostname:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  operator:
+    tree_file: `+opTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: operator
+    inherit_parent: true
+`)
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure: %v", err)
+	}
+
+	show := levels.ByName["operator"].Tree["show"]
+	if levels.ByName["exec"].Tree["show"] != show {
+		t.Fatal("test setup error: expected exec to inherit the identical *Command pointer for \"show\"")
+	}
+
+	problems := VerifyRoles(levels, &RoleSet{ByName: map[string]*Role{}})
+	if len(problems) != 1 {
+		t.Fatalf("expected exactly 1 problem, a shared command reported once regardless of how many levels reach it, got %d: %v", len(problems), problems)
+	}
+}

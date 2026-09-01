@@ -95,6 +95,9 @@ func TestLoadSystemConfigValid(t *testing.T) {
 		MaxFilterChainDepth: 2,
 
 		SuConfigTrustWindow: Duration(5 * time.Minute),
+
+		RolesFile:   "var/tree/roles.yaml",
+		DefaultsDir: "etc/defaults",
 	}
 
 	if !systemConfigsEqual(cfg, want) {
@@ -1423,6 +1426,9 @@ func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 		DefaultHistorySize:  1000,
 		FilterMatchMode:     "regex",
 		MaxFilterChainDepth: 5,
+
+		RolesFile:   "custom-roles.yaml",
+		DefaultsDir: "custom-defaults",
 	}
 
 	data, err := yaml.Marshal(in)

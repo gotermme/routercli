@@ -49,14 +49,14 @@ import (
 // UserSettablePassword check would refuse it regardless. That is
 // deliberate, not an oversight: a vendor defined secret was never
 // meant to survive a copy out to a file an ordinary end user, even
-// one with su-config access but no real reason to be looking at
+// one with admin access but no real reason to be looking at
 // startup-config's raw text, might read.
 //
 // RouterCLI replays this file back in automatically, once, at process
 // startup, before establishSession or the interactive loop begins,
-// see loadStartupConfig in main.go and cmd_su_config.go's own doc
-// comment for the full reasoning behind why that is safe with no
-// password prompting at all.
+// see command.LoadStartupConfig in command/replay.go and
+// cmd/core/cmd_admin.go's own doc comments for the full reasoning
+// behind why that is safe with no password prompting at all.
 //
 // What actually gets written here is not quite byte for byte
 // runningConfigLines' own output. execEnterWords, see cmd_show.go, is

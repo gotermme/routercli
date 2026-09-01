@@ -207,7 +207,7 @@ func startupConfigRoundTripLevels(t *testing.T) *command.TreeStructure {
 // "enable", before anything else, actually begins at, landing on a
 // ProductState equal to the one that produced it, and a session sitting
 // back at exec once replay finishes, not still stuck inside config.
-// This is main.go's own loadStartupConfig, minus the file read and
+// This is command.LoadStartupConfig, minus the file read and
 // paging.CaptureOutput wrapper, both of which are exercised directly by
 // TestMain, since neither one has anything to do with whether the
 // saved text itself actually resolves correctly starting from base.

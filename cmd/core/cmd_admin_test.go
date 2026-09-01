@@ -1,0 +1,640 @@
+// Copyright 2026 Bret Jordan, All rights reserved.
+//
+// Use of this source code is governed by an Apache 2.0 license
+// that can be found in the LICENSE file in the root of the source tree.
+
+package core
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/gotermme/routercli/auth"
+	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/paging"
+)
+
+// ----------------------------------------------------------------------
+// Fixtures
+// ----------------------------------------------------------------------
+
+// adminExecLevels - This function builds a minimal *command.TreeStructure
+// with "base", "exec", and "admin" levels, admin parented from exec,
+// the same shape var/tree/tree_structure.yaml declares, for tests
+// exercising the registered "admin" and "return.admin" handlers
+// without loading real YAML files.
+func adminExecLevels() *command.TreeStructure {
+	return &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"base":  {Name: "base", Tree: map[string]*command.Command{}},
+		"exec":  {Name: "exec", Parent: "base", PromptSuffix: "#", Tree: map[string]*command.Command{}},
+		"admin": {Name: "admin", Parent: "exec", PromptSuffix: "(admin)", Tree: map[string]*command.Command{}},
+	}}
+}
+
+// newAdminTestContext - This function builds a *command.AppContext
+// suitable for exercising the account and erase/reload/restore
+// handlers directly: a real, on-disk UsersFile seeded with u under
+// username, a matching, freshly loaded ctx.Users, and every other
+// field those handlers read.
+func newAdminTestContext(t *testing.T, username string, u *auth.User) *command.AppContext {
+	t.Helper()
+	ctx := newTestContext()
+	ctx.Session = &auth.Session{Username: username, Authenticated: true}
+	ctx.Users = auth.Users{username: u}
+	ctx.UsersFile = filepath.Join(t.TempDir(), "users.yaml")
+	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
+		t.Fatalf("failed to seed UsersFile: %v", err)
+	}
+	ctx.PasswordPolicy = auth.PasswordPolicy{MinLength: 1}
+	ctx.RolesFile = filepath.Join(t.TempDir(), "roles.yaml")
+	ctx.Roles = RolesFixture()
+	ctx.DefaultsDir = t.TempDir()
+	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config-does-not-exist")
+	return ctx
+}
+
+// RolesFixture - This function returns a *command.RoleSet declaring
+// two roles, "admin", marked bypass: true, and "operator", the same
+// shape this project's own shipped var/tree/roles.yaml declares.
+func RolesFixture() *command.RoleSet {
+	return &command.RoleSet{
+		ByName: map[string]*command.Role{
+			"admin":    {Name: "admin", Bypass: true},
+			"operator": {Name: "operator"},
+		},
+		BypassRole: "admin",
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// admin, return.admin
+//
+// ----------------------------------------------------------------------
+
+// TestAdminHandlerEntersAdminFromExec - This test verifies that the
+// registered "admin" handler moves a session from exec into admin,
+// mirroring TestEnableHandlerEntersExecFromBase in cmd_enable_test.go.
+func TestAdminHandlerEntersAdminFromExec(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	ctx.Position = command.NewCommandLevelStack("exec", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "admin")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("admin handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "admin" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "admin")
+	}
+}
+
+// TestAdminHandlerAlreadyHereIsNoOp - This test verifies that running
+// "admin" again while already there is a no-op, no error.
+func TestAdminHandlerAlreadyHereIsNoOp(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "admin"}
+	ctx.Position = command.NewCommandLevelStack("admin", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "admin")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("admin handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "admin" {
+		t.Errorf("Session.CommandLevel = %q, want %q (unchanged)", ctx.Session.CommandLevel, "admin")
+	}
+}
+
+// TestReturnAdminHandlerReturnsToExec - This test verifies that the
+// registered "return.admin" handler moves a session back from admin
+// to exec.
+func TestReturnAdminHandlerReturnsToExec(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "admin"}
+	ctx.Position = command.NewCommandLevelStack("admin", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "return.admin")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("return.admin handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "exec")
+	}
+}
+
+// TestReturnAdminHandlerNotHereIsNoOp - This test verifies that
+// running "return.admin" while not currently in admin is a no-op, no
+// error.
+func TestReturnAdminHandlerNotHereIsNoOp(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	ctx.Position = command.NewCommandLevelStack("exec", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "return.admin")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("return.admin handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q (unchanged)", ctx.Session.CommandLevel, "exec")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// account create
+//
+// ----------------------------------------------------------------------
+
+// TestRunAccountCreateWithIOInteractivePrompt - This test verifies the
+// bare "account create <username>" shape: it prompts interactively,
+// masked, twice, and the new account ends up with a working password
+// hash and MustChangePassword set true.
+func TestRunAccountCreateWithIOInteractivePrompt(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	master, slave := newPTY(t)
+	resCh := runHandler(func() error {
+		return runAccountCreateWithIO(ctx, int(slave.Fd()), slave, []string{"bob"})
+	})
+
+	sendLine(t, master, "n3wpassword")
+	sendLine(t, master, "n3wpassword")
+
+	if err := awaitHandler(t, resCh, 5*time.Second); err != nil {
+		t.Fatalf("runAccountCreateWithIO returned unexpected error: %v", err)
+	}
+	bob, ok := ctx.Users["bob"]
+	if !ok {
+		t.Fatal("expected account \"bob\" to have been created")
+	}
+	if !auth.VerifyPassword(bob.PasswordHash, "n3wpassword") {
+		t.Error("expected bob's password hash to verify against the typed password")
+	}
+	if !bob.MustChangePassword {
+		t.Error("expected MustChangePassword to be true after an interactively prompted password")
+	}
+}
+
+// TestRunAccountCreateWithIOMismatchedConfirmation - This test
+// verifies that a typed password and confirmation that do not match
+// leaves the account uncreated and returns an error.
+func TestRunAccountCreateWithIOMismatchedConfirmation(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	master, slave := newPTY(t)
+	resCh := runHandler(func() error {
+		return runAccountCreateWithIO(ctx, int(slave.Fd()), slave, []string{"bob"})
+	})
+
+	sendLine(t, master, "n3wpassword")
+	sendLine(t, master, "different")
+
+	if err := awaitHandler(t, resCh, 5*time.Second); err == nil {
+		t.Fatal("expected an error for a mismatched password confirmation")
+	}
+	if _, ok := ctx.Users["bob"]; ok {
+		t.Error("expected account \"bob\" not to have been created after a mismatched confirmation")
+	}
+}
+
+// TestRunAccountCreateGeneratesPassword - This test verifies "account
+// create <username> generate": the new account gets a working,
+// randomly generated password meeting ctx.PasswordPolicy and
+// MustChangePassword set true. The generated password itself is
+// printed once through the package level fmt.Println, not through the
+// injected stdout, the same convention runTOTPEnable's own secret
+// follows, see pty_test.go's own doc comment; reading it back out of
+// captured stdout is left to the pty based smoke test in PROGRESS.md's
+// Sandbox Interactive Testing, the same as that convention already
+// accepts for TOTP enrollment.
+func TestRunAccountCreateGeneratesPassword(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.PasswordPolicy = auth.PasswordPolicy{MinLength: 12, RequireUppercase: true, RequireNumbers: true, RequireSpecialChars: true}
+
+	var stdout bytes.Buffer
+	_, cerr := paging.CaptureOutput(func() {
+		if err := runAccountCreateWithIO(ctx, int(os.Stdin.Fd()), &stdout, []string{"carol", "generate"}); err != nil {
+			t.Errorf("runAccountCreateWithIO returned unexpected error: %v", err)
+		}
+	})
+	if cerr != nil {
+		t.Fatalf("paging.CaptureOutput returned error: %v", cerr)
+	}
+
+	carol, ok := ctx.Users["carol"]
+	if !ok {
+		t.Fatal("expected account \"carol\" to have been created")
+	}
+	if !carol.MustChangePassword {
+		t.Error("expected MustChangePassword to be true for a generated password")
+	}
+	if carol.PasswordHash == "" || !auth.IsRecognizedHash(carol.PasswordHash) {
+		t.Errorf("expected a real, recognized password hash, got %q", carol.PasswordHash)
+	}
+}
+
+// TestRunAccountCreateImportsHash - This test verifies "account
+// create <username> hash <hash>": the imported hash is stored
+// verbatim and MustChangePassword is left false, since an imported
+// hash is presumed to already be the real intended credential.
+func TestRunAccountCreateImportsHash(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	hash, err := auth.HashPassword("preexisting")
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runAccountCreateWithIO(ctx, int(os.Stdin.Fd()), &stdout, []string{"dave", "hash", hash}); err != nil {
+		t.Fatalf("runAccountCreateWithIO returned unexpected error: %v", err)
+	}
+
+	dave, ok := ctx.Users["dave"]
+	if !ok {
+		t.Fatal("expected account \"dave\" to have been created")
+	}
+	if dave.PasswordHash != hash {
+		t.Errorf("dave.PasswordHash = %q, want the imported hash %q verbatim", dave.PasswordHash, hash)
+	}
+	if dave.MustChangePassword {
+		t.Error("expected MustChangePassword to be false for an imported hash")
+	}
+}
+
+// TestRunAccountCreateRejectsUnrecognizedHash - This test verifies
+// that "account create <username> hash <value>" refuses a value that
+// is not a recognized "$id$encoded" hash.
+func TestRunAccountCreateRejectsUnrecognizedHash(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	var stdout bytes.Buffer
+	err := runAccountCreateWithIO(ctx, int(os.Stdin.Fd()), &stdout, []string{"dave", "hash", "not-a-real-hash"})
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized hash value")
+	}
+	if _, ok := ctx.Users["dave"]; ok {
+		t.Error("expected account \"dave\" not to have been created")
+	}
+}
+
+// TestRunAccountCreateRejectsExistingUsername - This test verifies
+// that "account create" refuses a username that already exists.
+func TestRunAccountCreateRejectsExistingUsername(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	var stdout bytes.Buffer
+	err := runAccountCreateWithIO(ctx, int(os.Stdin.Fd()), &stdout, []string{"admin", "hash", "$0$anything"})
+	if err == nil {
+		t.Fatal("expected an error creating an account with a username that already exists")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// account delete
+//
+// ----------------------------------------------------------------------
+
+// TestRunAccountDeleteRemovesAccount - This test verifies the
+// ordinary success path: deleting an account that is not the last
+// holder of the bypass role removes it from ctx.Users and persists
+// that to disk.
+func TestRunAccountDeleteRemovesAccount(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.Users["bob"] = &auth.User{Username: "bob", PasswordHash: "$0$x"}
+	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
+		t.Fatalf("failed to seed users file: %v", err)
+	}
+
+	if err := runAccountDelete(ctx, []string{"bob"}); err != nil {
+		t.Fatalf("runAccountDelete returned unexpected error: %v", err)
+	}
+	if _, ok := ctx.Users["bob"]; ok {
+		t.Error("expected account \"bob\" to have been deleted")
+	}
+}
+
+// TestRunAccountDeleteNotFound - This test verifies that deleting a
+// username with no matching account is refused with an error.
+func TestRunAccountDeleteNotFound(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runAccountDelete(ctx, []string{"ghost"}); err == nil {
+		t.Fatal("expected an error deleting a nonexistent account")
+	}
+}
+
+// TestRunAccountDeleteRefusesLastBypassRoleHolder - This test
+// verifies the safety rail: deleting the one remaining account that
+// holds the deployment's own bypass role is refused, closing off a
+// deployment locking itself out of admin entirely.
+func TestRunAccountDeleteRefusesLastBypassRoleHolder(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	err := runAccountDelete(ctx, []string{"admin"})
+	if err == nil {
+		t.Fatal("expected an error deleting the last account holding the bypass role")
+	}
+	if _, ok := ctx.Users["admin"]; !ok {
+		t.Error("expected the last bypass role holder to remain after a refused delete")
+	}
+}
+
+// TestRunAccountDeleteAllowsNonLastBypassRoleHolder - This test
+// verifies that deleting an account holding the bypass role is
+// allowed as long as it is not the only one left holding it.
+func TestRunAccountDeleteAllowsNonLastBypassRoleHolder(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.Users["carol"] = &auth.User{Username: "carol", PasswordHash: "$0$x", Roles: []string{"admin"}}
+	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
+		t.Fatalf("failed to seed users file: %v", err)
+	}
+
+	if err := runAccountDelete(ctx, []string{"admin"}); err != nil {
+		t.Fatalf("runAccountDelete returned unexpected error: %v", err)
+	}
+	if _, ok := ctx.Users["admin"]; ok {
+		t.Error("expected account \"admin\" to have been deleted since carol also holds the bypass role")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// account roles add, account roles remove
+//
+// ----------------------------------------------------------------------
+
+// TestRunAccountRolesAddAssignsRole - This test verifies the ordinary
+// success path for "account roles add".
+func TestRunAccountRolesAddAssignsRole(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.Users["bob"] = &auth.User{Username: "bob", PasswordHash: "$0$x"}
+	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
+		t.Fatalf("failed to seed users file: %v", err)
+	}
+
+	if err := runAccountRolesAdd(ctx, []string{"bob", "operator"}); err != nil {
+		t.Fatalf("runAccountRolesAdd returned unexpected error: %v", err)
+	}
+	if !hasRole(ctx.Users["bob"], "operator") {
+		t.Error("expected bob to hold the \"operator\" role")
+	}
+}
+
+// TestRunAccountRolesAddRejectsUnknownRole - This test verifies that
+// assigning a role name not declared in roles.yaml is refused
+// outright, rather than silently accepted and left to never match any
+// AllowedRoles check.
+func TestRunAccountRolesAddRejectsUnknownRole(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.Users["bob"] = &auth.User{Username: "bob", PasswordHash: "$0$x"}
+
+	if err := runAccountRolesAdd(ctx, []string{"bob", "ghost-role"}); err == nil {
+		t.Fatal("expected an error assigning an undeclared role")
+	}
+}
+
+// TestRunAccountRolesAddRejectsUnknownAccount - This test verifies
+// that assigning a role to a username with no matching account is
+// refused.
+func TestRunAccountRolesAddRejectsUnknownAccount(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runAccountRolesAdd(ctx, []string{"ghost", "operator"}); err == nil {
+		t.Fatal("expected an error assigning a role to a nonexistent account")
+	}
+}
+
+// TestRunAccountRolesAddAlreadyHasIsNoOp - This test verifies that
+// assigning a role the account already holds is a no-op, not an
+// error and not a duplicate entry.
+func TestRunAccountRolesAddAlreadyHasIsNoOp(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runAccountRolesAdd(ctx, []string{"admin", "admin"}); err != nil {
+		t.Fatalf("runAccountRolesAdd returned unexpected error: %v", err)
+	}
+	if len(ctx.Users["admin"].Roles) != 1 {
+		t.Errorf("expected no duplicate role entry, got %v", ctx.Users["admin"].Roles)
+	}
+}
+
+// TestRunAccountRolesRemoveRemovesRole - This test verifies the
+// ordinary success path for "account roles remove", removing a role
+// that is not the account's only hold on the bypass role.
+func TestRunAccountRolesRemoveRemovesRole(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin", "operator"}})
+
+	if err := runAccountRolesRemove(ctx, []string{"admin", "operator"}); err != nil {
+		t.Fatalf("runAccountRolesRemove returned unexpected error: %v", err)
+	}
+	if hasRole(ctx.Users["admin"], "operator") {
+		t.Error("expected the \"operator\" role to have been removed")
+	}
+}
+
+// TestRunAccountRolesRemoveDoesNotHaveIsNoOp - This test verifies
+// that removing a role the account does not hold is a no-op, not an
+// error.
+func TestRunAccountRolesRemoveDoesNotHaveIsNoOp(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runAccountRolesRemove(ctx, []string{"admin", "operator"}); err != nil {
+		t.Fatalf("runAccountRolesRemove returned unexpected error: %v", err)
+	}
+}
+
+// TestRunAccountRolesRemoveRefusesLastBypassRoleHolder - This test
+// verifies that removing the bypass role from its own last remaining
+// holder is refused, exactly as unrecoverable as "account delete"
+// would be in the same situation.
+func TestRunAccountRolesRemoveRefusesLastBypassRoleHolder(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	err := runAccountRolesRemove(ctx, []string{"admin", "admin"})
+	if err == nil {
+		t.Fatal("expected an error removing the bypass role from its last remaining holder")
+	}
+	if !hasRole(ctx.Users["admin"], "admin") {
+		t.Error("expected the bypass role to remain after a refused removal")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// erase users, restore-factory-defaults, reload
+//
+// ----------------------------------------------------------------------
+
+// TestRunEraseUsersRestoresFromDefaults - This test verifies that
+// "erase users" replaces the live UsersFile with DefaultsDir's own
+// skeleton copy and reloads ctx.Users from it.
+func TestRunEraseUsersRestoresFromDefaults(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	defaultHash, err := auth.HashPassword("changeme")
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+	defaultsBody := "users:\n  admin:\n    password: \"" + defaultHash + "\"\n    roles: [admin]\n    must_change_password: true\n"
+	defPath := filepath.Join(ctx.DefaultsDir, filepath.Base(ctx.UsersFile))
+	if err := os.WriteFile(defPath, []byte(defaultsBody), 0640); err != nil {
+		t.Fatalf("failed to seed default users.yaml: %v", err)
+	}
+
+	if err := runEraseUsers(ctx, nil); err != nil {
+		t.Fatalf("runEraseUsers returned unexpected error: %v", err)
+	}
+	restored, ok := ctx.Users["admin"]
+	if !ok {
+		t.Fatal("expected the restored users.yaml to still have an \"admin\" account")
+	}
+	if !restored.MustChangePassword {
+		t.Error("expected the restored account to carry MustChangePassword")
+	}
+}
+
+// TestRunEraseUsersNoDefaultsIsNotAnError - This test verifies that
+// "erase users" is a no-op, not an error, when DefaultsDir has no
+// matching skeleton file at all, and that ctx.Users is left
+// untouched.
+func TestRunEraseUsersNoDefaultsIsNotAnError(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runEraseUsers(ctx, nil); err != nil {
+		t.Fatalf("runEraseUsers returned unexpected error: %v", err)
+	}
+	if _, ok := ctx.Users["admin"]; !ok {
+		t.Error("expected ctx.Users to be left untouched when no default file exists")
+	}
+}
+
+// TestRunReloadEndsTheConnection - This test verifies that "reload"
+// re-reads ctx.UsersFile and ctx.RolesFile from disk and then returns
+// command.ErrQuit, the sentinel that ends the current connection.
+func TestRunReloadEndsTheConnection(t *testing.T) {
+	// auth.LoadUsers hard-rejects any account with an empty
+	// PasswordHash, see auth.User's own doc comment, so the fixture
+	// account needs a real hash on disk for runReload's own
+	// auth.LoadUsers call to succeed, unlike most other tests in this
+	// file that never reread UsersFile from disk at all.
+	hash, err := auth.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", PasswordHash: hash, Roles: []string{"admin"}})
+
+	err = runReload(ctx, nil)
+	if err != command.ErrQuit {
+		t.Fatalf("runReload returned %v, want command.ErrQuit", err)
+	}
+	if _, ok := ctx.Users["admin"]; !ok {
+		t.Error("expected ctx.Users to still have \"admin\" after reload re-read it from disk")
+	}
+}
+
+// TestRunRestoreFactoryDefaultsRestoresAndReloads - This test
+// verifies the full recovery path: startup-config is erased, both
+// users.yaml and roles.yaml are restored from DefaultsDir, and the
+// command ends by returning command.ErrQuit, the same as "reload".
+func TestRunRestoreFactoryDefaultsRestoresAndReloads(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := os.WriteFile(ctx.StartupConfigFile, []byte("hostname somehost\n"), 0640); err != nil {
+		t.Fatalf("failed to seed startup-config: %v", err)
+	}
+
+	defaultHash, err := auth.HashPassword("changeme")
+	if err != nil {
+		t.Fatalf("auth.HashPassword: %v", err)
+	}
+	usersBody := "users:\n  admin:\n    password: \"" + defaultHash + "\"\n    roles: [admin]\n    must_change_password: true\n"
+	if err := os.WriteFile(filepath.Join(ctx.DefaultsDir, filepath.Base(ctx.UsersFile)), []byte(usersBody), 0640); err != nil {
+		t.Fatalf("failed to seed default users.yaml: %v", err)
+	}
+	rolesBody := "roles:\n  admin:\n    desc: \"Full administrative access\"\n    bypass: true\n"
+	if err := os.WriteFile(filepath.Join(ctx.DefaultsDir, filepath.Base(ctx.RolesFile)), []byte(rolesBody), 0640); err != nil {
+		t.Fatalf("failed to seed default roles.yaml: %v", err)
+	}
+
+	err = runRestoreFactoryDefaults(ctx, nil)
+	if err != command.ErrQuit {
+		t.Fatalf("runRestoreFactoryDefaults returned %v, want command.ErrQuit", err)
+	}
+	if _, statErr := os.Stat(ctx.StartupConfigFile); !os.IsNotExist(statErr) {
+		t.Error("expected startup-config to have been erased")
+	}
+	restoredUsers, err := auth.LoadUsers(ctx.UsersFile)
+	if err != nil {
+		t.Fatalf("auth.LoadUsers after restore: %v", err)
+	}
+	if _, ok := restoredUsers["admin"]; !ok {
+		t.Error("expected the restored users.yaml to have an \"admin\" account")
+	}
+	restoredRoles, err := command.LoadRoles(ctx.RolesFile)
+	if err != nil {
+		t.Fatalf("command.LoadRoles after restore: %v", err)
+	}
+	if restoredRoles.BypassRole != "admin" {
+		t.Errorf("restoredRoles.BypassRole = %q, want %q", restoredRoles.BypassRole, "admin")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// generatePassword
+//
+// ----------------------------------------------------------------------
+
+// TestGeneratePasswordSatisfiesPolicy - This test verifies that a
+// generated password always satisfies the PasswordPolicy it was
+// generated for, across every required character class at once,
+// checked with auth.ValidatePassword itself rather than reimplementing
+// the same rules here.
+func TestGeneratePasswordSatisfiesPolicy(t *testing.T) {
+	policy := auth.PasswordPolicy{MinLength: 20, RequireUppercase: true, RequireNumbers: true, RequireSpecialChars: true}
+	for i := 0; i < 25; i++ {
+		password, err := generatePassword(policy)
+		if err != nil {
+			t.Fatalf("generatePassword returned unexpected error: %v", err)
+		}
+		if violations := auth.ValidatePassword(password, policy); len(violations) != 0 {
+			t.Fatalf("generated password %q violates its own policy: %v", password, violations)
+		}
+	}
+}
+
+// TestGeneratePasswordMeetsMinimumLengthFloor - This test verifies
+// that a policy with a very low or zero MinLength still generates a
+// password at least passwordGenMinLength characters long, deliberately
+// longer than whatever bare minimum was configured.
+func TestGeneratePasswordMeetsMinimumLengthFloor(t *testing.T) {
+	password, err := generatePassword(auth.PasswordPolicy{MinLength: 0})
+	if err != nil {
+		t.Fatalf("generatePassword returned unexpected error: %v", err)
+	}
+	if len(password) < passwordGenMinLength {
+		t.Errorf("generated password length %d, want at least %d", len(password), passwordGenMinLength)
+	}
+}
+
+// TestGeneratePasswordNeverExceedsMaxPasswordLength - This test
+// verifies that an extreme MinLength is capped at auth.MaxPasswordLength,
+// so ValidatePassword's own TooLong check can never reject a password
+// this function just generated.
+func TestGeneratePasswordNeverExceedsMaxPasswordLength(t *testing.T) {
+	password, err := generatePassword(auth.PasswordPolicy{MinLength: 1000})
+	if err != nil {
+		t.Fatalf("generatePassword returned unexpected error: %v", err)
+	}
+	if len(password) > auth.MaxPasswordLength {
+		t.Errorf("generated password length %d, want at most %d", len(password), auth.MaxPasswordLength)
+	}
+}

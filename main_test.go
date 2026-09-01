@@ -358,7 +358,7 @@ func TestMkdirForFileNoOpForBarePathWithNoDirectory(t *testing.T) {
 
 // ----------------------------------------------------------------------
 //
-// loadStartupConfig
+// command.LoadStartupConfig
 //
 // ----------------------------------------------------------------------
 
@@ -388,7 +388,7 @@ func writeMainTestTree(t *testing.T, yamlBody string) map[string]*command.Comman
 // handler, this file's own blank import of that package, and exec's
 // own tree carries a real "hostname" command, resolved through
 // cmd/product's, so TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition
-// below actually exercises loadStartupConfig, and the
+// below actually exercises command.LoadStartupConfig, and the
 // command.ReplayLines call inside it, the same way main() itself does,
 // not a stand-in for either one.
 func startupConfigLevelsForLoad(t *testing.T) *command.TreeStructure {
@@ -404,8 +404,8 @@ func startupConfigLevelsForLoad(t *testing.T) *command.TreeStructure {
 }
 
 // TestLoadStartupConfigMissingFileIsNotAnError - This test verifies
-// that loadStartupConfig treats a path that does not exist yet, the
-// state of a brand new deployment that has never run "copy
+// that command.LoadStartupConfig treats a path that does not exist
+// yet, the state of a brand new deployment that has never run "copy
 // running-config startup-config", as a no-op, not an error, and never
 // even touches ctx.Levels or ctx.Position along the way, since the
 // function returns before ever reaching either one.
@@ -416,8 +416,8 @@ func TestLoadStartupConfigMissingFileIsNotAnError(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "never-saved-startup-config")
 
-	if err := loadStartupConfig(ctx, path); err != nil {
-		t.Errorf("loadStartupConfig returned unexpected error for a nonexistent file: %v", err)
+	if err := command.LoadStartupConfig(ctx, path); err != nil {
+		t.Errorf("command.LoadStartupConfig returned unexpected error for a nonexistent file: %v", err)
 	}
 }
 
@@ -427,8 +427,8 @@ func TestLoadStartupConfigMissingFileIsNotAnError(t *testing.T) {
 // directly, cmd/product's own
 // TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable. It
 // writes a real saved startup-config file, "enable" followed by a
-// "hostname" line, calls loadStartupConfig against a fresh ctx sitting
-// at base, and confirms the hostname was actually applied to
+// "hostname" line, calls command.LoadStartupConfig against a fresh ctx
+// sitting at base, and confirms the hostname was actually applied to
 // ctx.State, that ctx.ReplayingStartupConfig is false again once it
 // returns, matching the trust window's own narrow, boot only scope,
 // and that ctx.Position and ctx.Session.CommandLevel both land back at
@@ -447,8 +447,8 @@ func TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition(t *testing.
 		t.Fatalf("failed to seed startup-config file: %v", err)
 	}
 
-	if err := loadStartupConfig(ctx, path); err != nil {
-		t.Fatalf("loadStartupConfig returned unexpected error: %v", err)
+	if err := command.LoadStartupConfig(ctx, path); err != nil {
+		t.Fatalf("command.LoadStartupConfig returned unexpected error: %v", err)
 	}
 
 	state := ctx.State.(*product.ProductState)
@@ -456,7 +456,7 @@ func TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition(t *testing.
 		t.Errorf("replayed Hostname = %q, want %q", state.Hostname, "myrouter")
 	}
 	if ctx.ReplayingStartupConfig {
-		t.Error("expected ReplayingStartupConfig to be false again once loadStartupConfig returns")
+		t.Error("expected ReplayingStartupConfig to be false again once command.LoadStartupConfig returns")
 	}
 	if ctx.Position.Current().Name != "base" {
 		t.Errorf("expected ctx.Position to be reset back to base, got %q", ctx.Position.Current().Name)

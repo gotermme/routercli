@@ -143,10 +143,33 @@ type Session struct {
 }
 
 // User - This type represents one entry in the user database.
+//
+// Roles is the set of role names, see command.Role and command.RoleSet
+// in package command, this account has been assigned, checked by
+// command.Authorized against a Command or CommandLevel's own
+// AllowedRoles list. This is empty for every account until an
+// administrator, from inside the new admin Command Level, runs
+// "account roles add", see cmd/core/cmd_admin.go. package auth itself
+// has no notion of what a role actually gates; it only carries the
+// names.
+//
+// MustChangePassword, false by default, forces a session logging in
+// as this account straight into the password change flow, before
+// anything else runs, the moment login succeeds, see main.go's own
+// call to core.RunPasswordChange right after establishSession. This
+// is set whenever "account create", see cmd/core/cmd_admin.go, either
+// prompted for this account's first password interactively or
+// generated one, never when a pre-computed hash was imported instead,
+// since an imported hash is presumed to already be the real intended
+// credential. A successful password change, forced or voluntary,
+// always clears this, see cmd/core/cmd_password.go's
+// finishPasswordChange.
 type User struct {
-	Username     string `yaml:"-"`
-	PasswordHash string `yaml:"password"`
-	TOTPSecret   string `yaml:"totp_secret,omitempty"`
+	Username           string   `yaml:"-"`
+	PasswordHash       string   `yaml:"password"`
+	TOTPSecret         string   `yaml:"totp_secret,omitempty"`
+	Roles              []string `yaml:"roles,omitempty"`
+	MustChangePassword bool     `yaml:"must_change_password,omitempty"`
 }
 
 // Users - This type is the in-memory form of the whole user database.

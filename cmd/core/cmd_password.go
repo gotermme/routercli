@@ -64,6 +64,20 @@ func runPasswordChange(ctx *command.AppContext, args []string) error {
 	return runPasswordChangeWithIO(ctx, int(os.Stdin.Fd()), os.Stdout)
 }
 
+// RunPasswordChange - This function is the exported entry point for
+// driving "password change" from outside package core. main.go calls
+// this exactly once, right after a successful login, when the
+// account that just logged in has MustChangePassword set, see
+// auth.User.MustChangePassword's own doc comment and cmd_admin.go's
+// "account create", the one place that flag is ever set. This is
+// otherwise identical to a session typing "password change" itself;
+// it exists only because main.go never resolves and dispatches a
+// command by name the way runLoop does, so it needs a real function
+// to call directly.
+func RunPasswordChange(ctx *command.AppContext, fd int, stdout io.Writer) error {
+	return runPasswordChangeWithIO(ctx, fd, stdout)
+}
+
 // runPasswordChangeWithIO - This function drives the interactive body
 // of "password change" against fd and stdout rather than the real
 // process's os.Stdin and os.Stdout directly, the same io.Writer and
@@ -243,9 +257,16 @@ func finishPasswordChange(ctx *command.AppContext, user *auth.User, newPassword,
 	}
 
 	previous := user.PasswordHash
+	previousMustChange := user.MustChangePassword
 	user.PasswordHash = hash
+	// A successful change, forced or voluntary, always clears a
+	// pending forced-change flag, see User.MustChangePassword's own
+	// doc comment. This account has just proven a real password of
+	// its own choosing, so there is nothing left to force.
+	user.MustChangePassword = false
 	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
 		user.PasswordHash = previous
+		user.MustChangePassword = previousMustChange
 		return false, err
 	}
 

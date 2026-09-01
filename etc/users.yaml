@@ -1,6 +1,7 @@
 users:
     admin:
         password: $6$$2a$10$ZFxjnWM/C6eQBmazkqeWCupZ/u9Col8nwJ3viDGPRz1m8OeeSy0HW
+        roles: [admin]
     bob:
         password: $6$$2a$10$boQkQvQbmnyGdmr4xmae/ONv5pPhVEntVMGePQkSguU12i9cUv0q2
     user1:

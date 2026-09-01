@@ -167,6 +167,23 @@ type Command struct {
 	MaxArgLength int    `yaml:"maxarglength"`
 	Requires     string `yaml:"requires"`
 
+	// AllowedRoles, empty by default, is the set of role names, see
+	// Role and RoleSet in roles.go, allowed to run this command. An
+	// empty list, the overwhelming common case today, means this
+	// command carries no role gate at all, and Authorized always
+	// returns true for it, exactly today's behavior, unchanged. A
+	// non-empty list means a session is refused unless the currently
+	// logged in user, see CurrentUserRoles, holds at least one role in
+	// this list, or holds the deployment's own bypass role, see
+	// RoleSet.BypassRole, deny by default with no other exception.
+	// This is checked in main.go's runLoop, at the same point
+	// EffectivePasswordHash is already checked, and is entirely
+	// independent of it: a command can carry a PasswordHash, an
+	// AllowedRoles list, both, or neither, and both are enforced when
+	// both are set. See var/tree/README.md for the full reasoning and
+	// var/tree/roles.yaml for where role names are declared.
+	AllowedRoles []string `yaml:"allowed_roles"`
+
 	// Pageable, false by default, opts this command into output
 	// capture, "| include", "| exclude", "| begin" filtering, and the
 	// "--More--" pager, see package paging. Piping a command that is
@@ -510,6 +527,33 @@ type AppContext struct {
 	Negated     bool
 	ListOptions ListOptions
 
+	// Roles is the deployment's own declared set of role names, loaded
+	// from var/tree/roles.yaml at startup, see LoadRoles. This is nil
+	// for a deployment that never sets AllowedRoles anywhere in its
+	// tree and never ships a roles.yaml at all, in which case
+	// Authorized always returns true, since there is nothing to check
+	// against. CurrentUserRoles and Authorized are the two functions
+	// that actually read this field; a handler wanting to check
+	// authorization itself should call Authorized rather than reading
+	// Roles directly.
+	Roles *RoleSet
+
+	// RolesFile is config.SystemConfig.RolesFile, copied here once at
+	// startup, the same reason UsersFile and StartupConfigFile are, so
+	// the new admin Command Level's "erase users" and
+	// "restore-factory-defaults" commands, see cmd/core/cmd_admin.go,
+	// know which file on disk to restore a fresh copy of roles.yaml
+	// over, without cmd/core needing any dependency on package config
+	// either.
+	RolesFile string
+
+	// DefaultsDir is config.SystemConfig.DefaultsDir, copied here once
+	// at startup, the directory "erase users" and
+	// "restore-factory-defaults" restore a skeleton file from, matched
+	// to a live file's own base name, rather than deleting to nothing.
+	// See config.SystemConfig.DefaultsDir's own doc comment.
+	DefaultsDir string
+
 	// PageLines is the live, per session override behind
 	// paging.EffectivePageLines, nil until "terminal length <n>" is
 	// typed, matching real Cisco's own session scoped, never
@@ -663,12 +707,13 @@ type AppContext struct {
 	// all is itself the trust event" reasoning recorded in this
 	// project's own design history for boot time configuration
 	// loading. See ReplayLines' own doc comment for the corresponding
-	// caller side, and loadStartupConfig in main.go for where this is
-	// actually set, always through a deferred reset back to false, so
-	// this window can never be left open past the one call it exists
-	// for. Nothing a live, interactive session can type ever sets
-	// this field; it exists purely for main.go's own internal use
-	// before any session begins.
+	// caller side, and LoadStartupConfig in replay.go for where this
+	// is actually set, always through a deferred reset back to false,
+	// so this window can never be left open past the one call it
+	// exists for. Nothing a live, interactive session can type ever
+	// sets this field; it exists purely for boot time and the new
+	// "reload" command's own internal use, see cmd/core/cmd_admin.go,
+	// never mid-session otherwise.
 	ReplayingStartupConfig bool
 }
 
@@ -867,8 +912,8 @@ type CommandLevel struct {
 	// other level's own password check for the AppContext.SuConfigTrustWindow
 	// duration that follows. See withinSuConfigTrust in
 	// treestructure.go for exactly how EnterCommandLevel uses this,
-	// and su-config, this project's own dedicated level for replaying
-	// a whole saved configuration accurately, for the level this
+	// and admin, this project's own dedicated level for replaying a
+	// whole saved configuration accurately, for the level this
 	// property is meant for. The default, false, is every ordinary
 	// level's setting; a level this is set on had better also require
 	// a real credential, PasswordHash or VendorDefinedPasswordHash,
@@ -889,11 +934,22 @@ type CommandLevel struct {
 	// show, the same generic, read-a-property-rather-than-hardcode-a-
 	// level-name approach this whole file already follows elsewhere.
 	// The default, false, is every ordinary level's setting; this is
-	// meant for su-config alone, since it exists specifically to give
-	// a real, live authenticated session, one that already knows or
-	// is choosing to record a vendor secret, a place to actually see
-	// it.
+	// meant for admin alone, since it exists specifically to give a
+	// real, live authenticated session, one that already knows or is
+	// choosing to record a vendor secret, a place to actually see it.
 	RevealVendorDefinedSecrets bool `yaml:"reveal_vendor_defined_secrets"`
+
+	// AllowedRoles, empty by default, is the set of role names allowed
+	// to run EnterCommand for this level. This is the CommandLevel
+	// counterpart to Command.AllowedRoles above, checked by
+	// EnterCommandLevel at the same point EffectivePasswordHash is
+	// already checked, and independent of it the same way. The new
+	// admin Command Level this project ships is the one level whose
+	// own AllowedRoles is set by default, gated to the deployment's
+	// own bypass role, see RoleSet.BypassRole, so only the account
+	// seeded with that role can reach it out of the box. See
+	// var/tree/roles.yaml and var/tree/README.md.
+	AllowedRoles []string `yaml:"allowed_roles"`
 
 	// PromptSuffix is appended to the prompt while this level, or a
 	// mode pushed from it such as config interface on top of config,

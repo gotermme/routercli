@@ -123,6 +123,8 @@ func DefaultSystemConfig() SystemConfig {
 		LanguageDir:                 "var/lang",
 		TreeStructure:               "var/tree/tree_structure.yaml",
 		CommonTreeFile:              "var/tree/level_common.yaml",
+		RolesFile:                   "var/tree/roles.yaml",
+		DefaultsDir:                 "etc/defaults",
 		StartupConfigFile:           "var/startup-config/startup-config",
 		AuthRequired:                false,
 		UsersFile:                   "etc/users.yaml",

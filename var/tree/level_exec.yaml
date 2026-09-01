@@ -38,9 +38,9 @@ commands:
     desc_key: diagnostic_mode.desc
     run: diagnostic-mode
 
-  su-config:
-    desc_key: su_config.desc
-    run: su-config
+  admin:
+    desc_key: admin.desc
+    run: admin
 
   configure:
     desc_key: configure.desc
