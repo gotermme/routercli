@@ -291,6 +291,129 @@ func TestLoadTreeStructureNestedModeAlongsideChain(t *testing.T) {
 	}
 }
 
+// TestLoadTreeStructureExcludesLevelSwitchCommandFromGrandchild - This
+// test is the direct regression test for a real reported bug: a
+// Command Level's own enter_command, "myenter" here, standing in for
+// "admin" in this project's own shipped tree, lives in exec's own
+// tree file and correctly stays reachable there, but must not survive
+// InheritParent into config, a further descendant of exec, since a
+// session inside config is never positioned at exec, checked by
+// RequireCurrentCommandLevel, so the command could never actually
+// succeed there, only sit in config's own listing failing every time
+// it was tried. An ordinary command, "show" here, is unaffected and
+// still carries all the way down to config, matching real Cisco and
+// HP fidelity, and a level's own directly declared commands,
+// "hostname" here, are unaffected regardless of where they came from.
+func TestLoadTreeStructureExcludesLevelSwitchCommandFromGrandchild(t *testing.T) {
+	registerTestHandlers()
+	baseTree := writeTree(t, "  enable:\n    run: test.noop\n")
+	execTree := writeTree(t, "  myenter:\n    run: test-switch-enter\n  show:\n    run: test.noop\n")
+	configTree := writeTree(t, "  hostname:\n    run: test.noop\n")
+	subTree := writeTree(t, "  diagnose:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  base:
+    tree_file: `+baseTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: base
+    inherit_parent: true
+    enter_command: test-basic-enter
+  config:
+    tree_file: `+configTree+`
+    parent: exec
+    inherit_parent: true
+  sub:
+    tree_file: `+subTree+`
+    parent: exec
+    inherit_parent: false
+    enter_command: test-switch-enter
+`)
+
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure returned unexpected error: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	if _, ok := exec.Tree["myenter"]; !ok {
+		t.Error("expected exec's own tree to still contain \"myenter\", its own declared command")
+	}
+	if _, ok := exec.Tree["show"]; !ok {
+		t.Error("expected exec's tree to still contain \"show\"")
+	}
+
+	config := levels.ByName["config"]
+	if _, ok := config.Tree["myenter"]; ok {
+		t.Error("expected config's tree to NOT contain \"myenter\", sub's own enter_command, inherited from exec")
+	}
+	if _, ok := config.Tree["show"]; !ok {
+		t.Error("expected config's tree to still contain \"show\", an ordinary command, inherited from exec")
+	}
+	if _, ok := config.Tree["hostname"]; !ok {
+		t.Error("expected config's tree to still contain its own \"hostname\" command")
+	}
+}
+
+// TestLoadTreeStructureExcludesLevelSwitchCommandDropsEmptyContainer -
+// This test verifies the nested case, matching this project's own
+// shipped tree exactly: "configure terminal" in var/tree/level_exec.yaml,
+// where the level switching command is a subcommand, "terminal" here,
+// nested under a container, "configure" here, that exists purely to
+// hold it. Once "terminal" is filtered out, "configure" has no Run of
+// its own and no Subcommands left either, and must be dropped
+// entirely rather than surviving as an empty, unusable stub.
+func TestLoadTreeStructureExcludesLevelSwitchCommandDropsEmptyContainer(t *testing.T) {
+	registerTestHandlers()
+	baseTree := writeTree(t, "  enable:\n    run: test.noop\n")
+	execTree := writeTree(t, `  configure:
+    subcommands:
+      terminal:
+        run: test-switch-enter
+  show:
+    run: test.noop
+`)
+	configTree := writeTree(t, "  hostname:\n    run: test.noop\n")
+	common := emptyCommonTree(t)
+	manifest := writeManifest(t, `
+  base:
+    tree_file: `+baseTree+`
+    is_base: true
+  exec:
+    tree_file: `+execTree+`
+    parent: base
+    inherit_parent: true
+    enter_command: test-basic-enter
+  config:
+    tree_file: `+configTree+`
+    parent: exec
+    inherit_parent: true
+    enter_command: test-switch-enter
+`)
+
+	levels, err := LoadTreeStructure(manifest, common)
+	if err != nil {
+		t.Fatalf("LoadTreeStructure returned unexpected error: %v", err)
+	}
+
+	exec := levels.ByName["exec"]
+	if _, ok := exec.Tree["configure"]; !ok {
+		t.Error("expected exec's own tree to still contain its own \"configure\" container")
+	}
+	if exec.Tree["configure"].Subcommands["terminal"] == nil {
+		t.Error("expected exec's own \"configure\" to still carry its own \"terminal\" subcommand")
+	}
+
+	config := levels.ByName["config"]
+	if _, ok := config.Tree["configure"]; ok {
+		t.Error("expected config's tree to NOT contain \"configure\" at all, since its only subcommand, \"terminal\", is config's own enter_command")
+	}
+	if _, ok := config.Tree["show"]; !ok {
+		t.Error("expected config's tree to still contain \"show\", an ordinary command, inherited from exec")
+	}
+}
+
 func keysOf(m map[string]*Command) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -1360,13 +1483,15 @@ func rolesLevelFixture(t *testing.T, allowed []string) *TreeStructure {
 
 // TestEnterCommandLevelDeniesWithoutMatchingRole - This test verifies
 // that a level carrying AllowedRoles refuses a session holding no
-// role in that list, the deny by default convention Authorized itself
-// documents, checked independently of, and before, any PasswordHash
-// this level might also carry.
+// role in that list, once this deployment has AuthRequired turned on,
+// the deny by default convention Authorized itself documents, checked
+// independently of, and before, any PasswordHash this level might
+// also carry.
 func TestEnterCommandLevelDeniesWithoutMatchingRole(t *testing.T) {
 	registerTestHandlers()
 	levels := rolesLevelFixture(t, []string{"admin"})
 	ctx := testContext(t, levels, "operator")
+	ctx.AuthRequired = true
 	ctx.Session.Authenticated = true
 	ctx.Session.Username = "alice"
 	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"operator"}}}
@@ -1390,6 +1515,7 @@ func TestEnterCommandLevelGrantsWithMatchingRole(t *testing.T) {
 	registerTestHandlers()
 	levels := rolesLevelFixture(t, []string{"admin"})
 	ctx := testContext(t, levels, "operator")
+	ctx.AuthRequired = true
 	ctx.Session.Authenticated = true
 	ctx.Session.Username = "alice"
 	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}
@@ -1414,6 +1540,7 @@ func TestEnterCommandLevelGrantsViaBypassRole(t *testing.T) {
 	registerTestHandlers()
 	levels := rolesLevelFixture(t, []string{"some-other-role"})
 	ctx := testContext(t, levels, "operator")
+	ctx.AuthRequired = true
 	ctx.Session.Authenticated = true
 	ctx.Session.Username = "alice"
 	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}
@@ -1438,8 +1565,12 @@ func TestEnterCommandLevelRoleGateWaivedDuringReplay(t *testing.T) {
 	levels := rolesLevelFixture(t, []string{"admin"})
 	ctx := testContext(t, levels, "operator")
 	ctx.ReplayingStartupConfig = true
-	// Deliberately no Session.Authenticated, no Users, no Roles at
-	// all: an ordinary session in this state would be denied outright.
+	// Deliberately no AuthRequired, no Session.Authenticated, no
+	// Users, no Roles at all: ReplayingStartupConfig short-circuits
+	// the role gate before Authorized is ever even called, so none of
+	// that is what is actually under test here, see
+	// TestAuthorizedGrantsWhenAuthRequiredOff in roles_test.go for
+	// AuthRequired's own separate effect on Authorized.
 
 	entered, err := EnterCommandLevel(ctx, levels.ByName["exec"], levels.ByName["operator"])
 	if err != nil {
@@ -1465,6 +1596,7 @@ func TestEnterCommandLevelRoleGateIndependentOfPassword(t *testing.T) {
 	exec.PasswordHash = hash
 
 	ctx := testContext(t, levels, "operator")
+	ctx.AuthRequired = true
 	ctx.Session.Authenticated = true
 	ctx.Session.Username = "alice"
 	ctx.Users = auth.Users{"alice": {Username: "alice", Roles: []string{"admin"}}}

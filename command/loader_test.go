@@ -24,6 +24,12 @@ var testHandlersOnce sync.Once
 func registerTestHandlers() {
 	testHandlersOnce.Do(func() {
 		Register("test.noop", func(ctx *AppContext, args []string) error { return nil })
+		// test-switch-enter stands in for a real product's own level
+		// switching command, "admin" in this project's own shipped
+		// tree for instance, registered under a name that also shows
+		// up as some test manifest's own enter_command, see
+		// treestructure_test.go's filterLevelSwitchCommands coverage.
+		Register("test-switch-enter", func(ctx *AppContext, args []string) error { return nil })
 	})
 }
 

@@ -397,10 +397,10 @@ type ResolveResult struct {
 // as Users itself.
 //
 // StartupConfigFile is config.SystemConfig.StartupConfigFile, copied
-// here once at startup the same reason UsersFile is, so su-config's
-// own "copy running-config startup-config", "erase startup-config",
-// and "show startup-config" commands, in cmd/product, can read and
-// write the one file main.go itself already knows the path to,
+// here once at startup the same reason UsersFile is, so admin's
+// own "write memory", "erase startup-config", and "show
+// startup-config" commands, in cmd/product, can read and write the
+// one file main.go itself already knows the path to,
 // without cmd/product needing any dependency on package config
 // either. Unlike UsersFile this is never empty; StartupConfigFile has
 // a real default even when nothing in etc/routercli.yaml overrides
@@ -547,12 +547,39 @@ type AppContext struct {
 	// either.
 	RolesFile string
 
+	// AuthRequired is config.SystemConfig.AuthRequired, copied here
+	// once at startup, the same reason RolesFile is, so Authorized in
+	// roles.go can tell whether this deployment has authentication
+	// turned on at all without package command needing any dependency
+	// on package config either. This is what keeps a project's own
+	// out of the box, zero setup experience genuinely wide open: a
+	// Command or CommandLevel's own AllowedRoles list, admin's own
+	// allowed_roles in this project's shipped tree for instance, is
+	// only ever actually enforced once a deployment turns AuthRequired
+	// on, the same moment identity itself starts to exist for any
+	// session at all. See Authorized's own doc comment for the full
+	// reasoning.
+	AuthRequired bool
+
 	// DefaultsDir is config.SystemConfig.DefaultsDir, copied here once
 	// at startup, the directory "erase users" and
 	// "restore-factory-defaults" restore a skeleton file from, matched
 	// to a live file's own base name, rather than deleting to nothing.
 	// See config.SystemConfig.DefaultsDir's own doc comment.
 	DefaultsDir string
+
+	// ReloadScheduler tracks at most one pending, delayed "reload
+	// <seconds>" or "reboot <seconds>", see cmd/core/cmd_admin.go and
+	// PendingReload's own doc comment in reload.go. main.go constructs
+	// this once, at startup, and its own runLoop selects on
+	// ReloadScheduler.FireChannel() alongside reading the next typed
+	// line, so a scheduled reload can end the session even while the
+	// loop is otherwise blocked waiting on interactive input. This is
+	// nil only in a hand built *AppContext, a test for instance, that
+	// never sets it; "reload <seconds>" and "reboot <seconds>" both
+	// refuse outright rather than panicking when that happens, see
+	// reload.not_supported.
+	ReloadScheduler *PendingReload
 
 	// PageLines is the live, per session override behind
 	// paging.EffectivePageLines, nil until "terminal length <n>" is
@@ -604,6 +631,20 @@ type AppContext struct {
 	// same idea. See cmd/core/cmd_terminal.go's "terminal width"
 	// handler, the only place this is ever written.
 	TerminalWidth *int
+
+	// DefaultTerminalWidth is the fallback width
+	// paging.EffectiveTerminalWidth falls back to only when
+	// TerminalWidth is unset and the real terminal's own width cannot
+	// be read, piped or redirected stdin for instance, mirroring the
+	// role DefaultPageLines above already plays for PageLines. Unlike
+	// DefaultPageLines, there is no build time config.SystemConfig
+	// field behind this one; it starts at zero, the same zero
+	// paging.EffectiveTerminalWidth always returned before this field
+	// existed, and is only ever changed after startup by a persisted
+	// "line" mode "width <n>" setting replayed from startup-config,
+	// see main.go's own read-back of product.ProductState.Line right
+	// after LoadStartupConfig runs.
+	DefaultTerminalWidth int
 
 	// HistoryFile is config.SystemConfig.HistoryFile, copied here once
 	// at startup, resolved to its real, final path first, see
@@ -687,7 +728,12 @@ type AppContext struct {
 	// Command Level along the way with no prompt at all, and never
 	// sets that level's own LastAuthenticatedAt while doing so, the
 	// same "does not chain any further trust" reasoning
-	// withinSuConfigTrust's own case already follows.
+	// withinSuConfigTrust's own case already follows. cmd/core/cmd_user.go's
+	// own "user" handler reads this same field for the same reason, to
+	// let a saved runtime defined command alias belonging to the user
+	// Command Level replay back in even though nobody has logged in
+	// yet, waiving only that entry's own requireLoggedIn check, never
+	// any live action such as "totp enable" or "password change".
 	//
 	// This is a third, deliberately separate kind of trust from
 	// ReauthGracePeriod and SuConfigTrustWindow above, not a variation
@@ -1000,6 +1046,33 @@ type CommandLevel struct {
 	// anywhere; a fresh process starts every level at its zero value
 	// regardless of how recently the previous run authenticated.
 	LastAuthenticatedAt time.Time `yaml:"-"`
+
+	// Aliases holds every runtime defined command alias this level
+	// currently has, keyed by the alias name a session actually types,
+	// each mapping to the literal token sequence it expands to. It
+	// starts nil, the correct state for a level nobody has ever
+	// defined an alias against, and is only ever written by the
+	// "alias" command in cmd/core, never decoded from YAML: an alias
+	// is deliberately a runtime concept, matching real Cisco and HP,
+	// where "alias exec" and "alias configure" are themselves
+	// configuration commands typed at a prompt, not something a
+	// device ships with declared ahead of time in a manifest. See
+	// ExpandAlias below for how a session's own typed line is checked
+	// against this map before Resolve ever runs, and
+	// cmd/product/cmd_show.go's own running-config rendering for how a
+	// defined alias survives a restart the same way hostname and
+	// interface state already do.
+	//
+	// This is intentionally keyed on this level's own Name, one map
+	// per level, rather than one shared map for the whole tree: real
+	// Cisco and HP keep "alias exec" and "alias configure" as two
+	// separate namespaces, and RouterCLI's own tree is not fixed to
+	// just those two levels, so scoping this the same way every other
+	// per-level concept in this package already is, AllowedRoles and
+	// PasswordHash among them, is what lets a short name make sense in
+	// one level without silently also shadowing something unrelated in
+	// another.
+	Aliases map[string][]string `yaml:"-"`
 }
 
 // EffectivePasswordHash returns whichever hash actually gates

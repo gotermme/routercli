@@ -20,6 +20,13 @@ commands:
     # whichever interface name was given.
     run: interface
 
+  line:
+    desc_key: line.desc
+    # Pushes config-line mode (see cmd/product/cmd_line.go), item 11 of
+    # the Framework Gap Roadmap, the persistent, deployment wide
+    # default for terminal length, width, and paging.
+    run: line
+
   banner:
     desc_key: banner.desc
     subcommands:

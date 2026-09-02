@@ -96,6 +96,53 @@ func TestUserHandlerRequiresBaseLevel(t *testing.T) {
 	}
 }
 
+// TestUserHandlerAllowsNilSessionWhenReplayingStartupConfig - This
+// test verifies that the "user" handler waives requireLoggedIn, and
+// does not panic on ctx.Session being nil, while
+// ctx.ReplayingStartupConfig is true, the exact state
+// command.LoadStartupConfig's own boot time replay runs in, before
+// any session has logged in at all, see AppContext.ReplayingStartupConfig's
+// own doc comment in command/model.go.
+func TestUserHandlerAllowsNilSessionWhenReplayingStartupConfig(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = userLevels()
+	ctx.Session = nil
+	ctx.ReplayingStartupConfig = true
+	ctx.Position = command.NewCommandLevelStack("base", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "user")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("user handler returned unexpected error during a trusted replay: %v", err)
+	}
+	if ctx.Position.Current().Name != "user" {
+		t.Errorf("Current().Name = %q, want %q", ctx.Position.Current().Name, "user")
+	}
+}
+
+// TestUserHandlerStillRequiresLoginWhenNotReplaying - This test
+// verifies that the ReplayingStartupConfig waiver above is scoped
+// exactly to a trusted replay: an ordinary, live session with
+// ReplayingStartupConfig left false is still refused entry without
+// logging in first, the same outcome TestUserHandlerRequiresLogin
+// already covers for a non-nil, unauthenticated Session, checked here
+// again against a nil Session specifically, to prove the waiver is
+// keyed on ReplayingStartupConfig, not merely on Session being nil.
+func TestUserHandlerStillRequiresLoginWhenNotReplaying(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = userLevels()
+	ctx.Session = nil
+	ctx.ReplayingStartupConfig = false
+	ctx.Position = command.NewCommandLevelStack("base", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "user")
+
+	if err := cmd.RunFunc(ctx, nil); err == nil {
+		t.Fatal("expected an error entering user mode with a nil Session outside a trusted replay, got nil")
+	}
+	if ctx.Position.Depth() != 1 {
+		t.Errorf("expected Position to stay at depth 1 after a refused entry, got %d", ctx.Position.Depth())
+	}
+}
+
 // TestUserHandlerPushesUserFrameWhenAuthenticated - This test
 // verifies that the "user" handler pushes a CommandLevelFrame named
 // "user", carrying the manifest's own PromptSuffix, once both the

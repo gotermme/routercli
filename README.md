@@ -590,6 +590,47 @@ Paging: enabled (session), enabled (global)
 Filter mode: substring
 ```
 
+A deployment can still change what a fresh session, one that has never
+typed `terminal length`, `terminal width`, or `terminal filter-mode`
+itself, falls back to, without editing `etc/routercli.yaml` and
+restarting. `configure terminal`, then `line`, enters a Command Level of
+its own, `line`, holding exactly three settings: `length <0-512>`,
+`width <0-512>`, and `paging`, negatable as `no paging`. Each one takes
+effect immediately, the same as `hostname` or any other configuration
+command, and, once saved with `write memory`, survives a restart,
+replayed back in at boot exactly like every other saved setting:
+
+```
+router(config)# line
+router(config-line)# length 30
+Default terminal length set to 30.
+router(config-line)# width 100
+Default terminal width set to 100.
+router(config-line)# no paging
+Paging disabled by default for this deployment.
+router(config-line)# end
+router# admin
+router(admin)# write memory
+Running-config saved to startup-config, and every account change saved to disk.
+```
+
+This is a genuinely different thing from `terminal length` and
+`terminal width` above, not a persisted way of writing the same value.
+`line length` and `line width` change what a session with no override of
+its own sees, exactly the role real Cisco and HP's own `line vty` and
+`line console` modes play; they never touch a session that has already
+typed `terminal length` or `terminal width` for itself. `line` renders
+in `show running-config` and `show startup-config` only once at least
+one of its three settings has actually been changed, the same
+"nothing configured, nothing shown" convention `hostname` and every
+interface already follow. RouterCLI has no listener of its own yet, one
+process per connection, invoked however a deployment's own wrapper
+chooses, so unlike a real device, `line` keeps a single, global set of
+defaults today rather than a separate `line vty` and `line console`
+split. A real split needs RouterCLI to actually own a network listener
+first, so it knows which kind of connection it is talking to rather
+than guessing, left for a future daemon architecture.
+
 ### 10. Login and exec banners
 
 ```
@@ -663,6 +704,17 @@ This is a separate, independent gate from `password_hash`. A Command or
 Command Level MAY set either, both, or neither, and both are enforced
 when both are set.
 
+`allowed_roles` is only actually enforced while `AuthRequired`, in
+`etc/routercli.yaml`, is `true`. RouterCLI exists as a library first,
+meant to be picked up with nothing configured yet and produce a
+genuinely working, wide open command line, not one that quietly locks
+a project builder out of a level they just declared in their own tree
+file. With `AuthRequired` off, RouterCLI's own shipped default, no
+session anywhere has a real identity to hold a role against in the
+first place, so `allowed_roles` stays wide open everywhere, `admin`
+included, until a deployment, its own vendor, or its very first
+administrator, actually turns `AuthRequired` on.
+
 ```yaml
 # var/tree/roles.yaml
 roles:
@@ -715,11 +767,10 @@ place, before any ordinary role exists to grant it that access.
 The shipped example ships exactly one Command Level gated this way, `admin`,
 reached from `exec` with `admin`, left with `return`. It replaces what
 earlier phases called `su-config`; its own `show running-config`, `show
-startup-config`, `copy running-config startup-config`, and `erase
-startup-config` commands moved here unchanged. `admin` also carries this
-deployment's own account management commands, under the word `account`,
-deliberately chosen to avoid confusion with the existing self service
-`user` Command Level:
+startup-config`, and `erase startup-config` commands moved here
+unchanged. `admin` also carries this deployment's own account
+management commands, under the word `account`, deliberately chosen to
+avoid confusion with the existing self service `user` Command Level:
 
 ```
 router(admin)# account create bob
@@ -747,7 +798,54 @@ and `account roles remove` when removing the reserved bypass role,
 refuses when the target is the last account left holding it, closing off
 a deployment locking itself out of `admin` entirely with no way back.
 
-Recovering from that lockout anyway, however it happened, is what
+Every one of the commands above, `account create`/`delete`, `account
+roles add`/`roles remove`, `password change`, and `totp enable`/`totp
+disable` alike, changes only this session's own in memory copy of
+`UsersFile`. None of them writes to disk on their own; RouterCLI never
+lets a single typed command survive a restart automatically, no matter
+how it looks on a real device. `write memory` is the one command that
+writes anything to disk at all, saving an account or role change
+alongside everything `running-config` already covers:
+
+```
+router(admin)# write memory
+Running-config saved to startup-config, and every account change saved to disk.
+```
+
+Real Cisco and HP ship `write memory` as a synonym alongside a separate
+`copy running-config startup-config` that only ever covers the first
+half of this. RouterCLI ships `write memory` alone, on purpose,
+matching this project's own design goal against building two commands
+that would otherwise almost, but not quite, do the same thing: one
+command, reachable one way, saves everything in memory to disk.
+
+Because an account or role change can lock the very session that made it
+out of the device, `reload` and `reboot`, full synonyms for the same
+command, accept an optional delay, matching real Cisco and HP ProCurve:
+
+```
+router(admin)# reload 300
+Reload scheduled in 300 seconds. Use 'no reload' or 'no reboot' to cancel it before it fires.
+router(admin)# no reload
+Scheduled reload cancelled.
+```
+
+The use case this exists for is the same one every real network operator
+already knows. Save the current, known good configuration with `write
+memory`, schedule a reload a few minutes out with `reload 300`, make the
+change, then log out and log back in to confirm it actually works. If
+login now fails, waiting out the delay restores the last saved
+configuration automatically and access returns once the reload fires; if
+it succeeds, `no reload` cancels the pending reload before that happens.
+Once the change is confirmed working, `write memory` saves it as the new
+known good configuration. `reload`/`reboot` typed with no delay reloads
+immediately instead, rereading `UsersFile`, `RolesFile`, and
+`startup-config` fresh from disk, rebuilding the current session's own in
+memory state from them, and ending the connection, forcing whoever ran it
+to reconnect, discarding any unsaved change along the way exactly as a
+real restart would.
+
+Recovering from a lockout, however it happened, is what
 `restore-factory-defaults` is for. `etc/defaults/` holds skeleton copies
 of `UsersFile` and `RolesFile`, restored over the live files by
 `restore-factory-defaults`, and, separately, by `erase users`, which
@@ -755,17 +853,87 @@ restores `UsersFile` alone rather than deleting it to nothing the way
 `erase startup-config` safely can: an empty user database would
 permanently lock every account, the bypass role included, out of the
 whole deployment. `restore-factory-defaults` additionally erases
-`startup-config` and then reloads, the same as running `reload` on its
-own. `reload` rereads `UsersFile`, `RolesFile`, and `startup-config`
-fresh from disk, rebuilds the current session's own in memory state from
-them, and ends the connection, forcing whoever ran it to reconnect.
-RouterCLI is one process per connection today, with no persistent daemon
-behind it, so `reload` cannot affect any other already connected
-session. Multi-session awareness, and the daemon architecture true
-multi-session support would need, is future work, not something this
-project has built yet.
+`startup-config` and then reloads, the same as running `reload` with no
+delay on its own. RouterCLI is one process per connection today, with no
+persistent daemon behind it, so `reload` cannot affect any other already
+connected session. Multi-session awareness, and the daemon architecture
+true multi-session support would need, is future work, not something
+this project has built yet.
 
-## 14. Testing
+### 14. Command Aliases
+
+A session, or an administrator setting one up ahead of time, can define a
+short name of their own for any command, the same idea real Cisco's own
+`alias exec` and `alias configure` cover. `alias <alias> <word...>`
+defines one, scoped to whichever Command Level the session is standing in
+at the moment it is typed, so there is no separate level argument to get
+right:
+
+```
+router# admin
+router(admin)# alias wr write memory
+Alias "wr" defined for admin, expands to: write memory
+router(admin)# wr
+Running-config saved to startup-config, and every account change saved to disk.
+```
+
+Aliases are scoped per Command Level on purpose, exactly like real Cisco
+keeps `alias exec` and `alias configure` as two separate namespaces: an
+alias defined while standing in `exec` has no effect while a session is
+sitting in `config`, and the other way around, since RouterCLI never asks
+which level an alias belongs to, it already knows, `ctx.Position.Current()`
+at the moment `alias` runs. This also means an alias cannot be typed at
+all until a session is actually inside the level it was defined for, the
+same as any other command that only exists in one Command Level's own
+tree. `<alias>` is the short word a session will type from then on; it is
+refused outright if it collides with a real, already reachable command in
+that same level, so an alias can never silently shadow one. It is also
+refused if it collides with an alias already defined at that level;
+unlike real Cisco's own "define again to change it" convention, RouterCLI
+requires `no alias <alias>` first, a deliberate security measure. Anyone
+able to type at a session could otherwise change what an already trusted
+alias name quietly expands to, and a session that never happens to run
+`show aliases` again would have no way to notice. Requiring an explicit
+removal first, its own separate confirmation printed, makes that kind of
+change something a session has to see happen. `<word...>` is
+the real command it expands to, taken literally, with any argument a
+session types after the alias itself appended on the end, `wr` above
+taking no further argument, but an alias defined with only part of a
+command, `alias sh show`, would let `sh interface` run `show interface`.
+`no alias <alias>` removes one, again read from whichever level the
+session is currently standing in. `show aliases` lists every alias
+currently defined, grouped by Command Level.
+
+An alias is expanded once, against only the very first word of a typed
+line, before that line is resolved against the command tree at all, so an
+alias whose own expansion happens to start with another alias's own name
+is never chased a second time; a session can never define a cycle that
+hangs command dispatch. Interactive Tab completion and `?` help do not
+currently expand an alias the way running one does: typing an alias's own
+short name still runs the real command it stands for, but completing
+partway through typing one offers no special help beyond what the
+alias's own literal name already gets as an ordinary word.
+
+Real Cisco and HP have no literal "help <command>" form of their own;
+extra help for one specific command comes from typing the command
+itself followed by `?`, `alias ?` for example. RouterCLI's own `help`
+command accepts an optional command name for exactly the same purpose,
+`help alias` printing precisely what `alias ?` already prints, useful
+anywhere the raw `?` keypress itself is inconvenient to send, a
+non-interactive pipe or a copied transcript for instance. `help` with
+nothing after it still lists every command available at the current
+Command Level, unchanged.
+
+An alias applies to the running session right away and shows up in `show
+running-config` immediately, the same as any other configuration change,
+whatever Command Level it belongs to, `base` and `user` included. It
+reaches disk, and so survives a restart, only once `write memory`
+actually saves it, exactly like every other setting RouterCLI ships;
+see section 13 above for `write memory` itself and for `reload`'s own
+save, schedule, verify, cancel or let it fire pattern. No command
+anywhere in RouterCLI writes to disk on its own.
+
+## 15. Testing
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -787,7 +955,7 @@ editing it, run `./routercli --check-config`. It loads and verifies the Tree
 Structure without starting the interactive loop, and is worth running as part
 of the same routine.
 
-## 15. Code execution logic
+## 16. Code execution logic
 
 1. `main.go` runs.
 2. Every `init()` in `cmd/core` and `cmd/product` runs. This happens

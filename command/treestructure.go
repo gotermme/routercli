@@ -150,6 +150,24 @@ func LoadTreeStructure(manifestPath, commonPath string) (*TreeStructure, error) 
 	}
 	markCommonCommands(commonTree)
 
+	// levelSwitchNames collects every EnterCommand and ExitCommand
+	// declared anywhere in this manifest, "admin" and "disable" for
+	// instance, this project's own shipped tree. See
+	// filterLevelSwitchCommands's own doc comment for why these are
+	// stripped back out again whenever InheritParent carries a tree
+	// forward into a further descendant, rather than left to
+	// accumulate down the whole chain the way an ordinary command
+	// such as "show" correctly does.
+	levelSwitchNames := make(map[string]bool, len(levels)*2)
+	for _, l := range levels {
+		if l.EnterCommand != "" {
+			levelSwitchNames[l.EnterCommand] = true
+		}
+		if l.ExitCommand != "" {
+			levelSwitchNames[l.ExitCommand] = true
+		}
+	}
+
 	// Build the order, base first, then anything whose parent is
 	// already resolved, in whatever order that ends up being, since
 	// only the base level itself has no parent to wait on, along with
@@ -177,7 +195,8 @@ func LoadTreeStructure(manifestPath, commonPath string) (*TreeStructure, error) 
 			}
 			effectiveRaw := ownRaw
 			if l.InheritParent && l.Parent != "" {
-				merged, err := MergeTrees(rawTrees[l.Parent], ownRaw)
+				inherited := filterLevelSwitchCommands(rawTrees[l.Parent], levelSwitchNames)
+				merged, err := MergeTrees(inherited, ownRaw)
 				if err != nil {
 					return nil, fmt.Errorf("merging Command Level %q with parent %q: %w", name, l.Parent, err)
 				}
@@ -230,6 +249,76 @@ func markCommonCommands(tree map[string]*Command) {
 			markCommonCommands(cmd.Subcommands)
 		}
 	}
+}
+
+// filterLevelSwitchCommands - This function returns a new map, built
+// from tree, that leaves out any command whose Run names some Command
+// Level's own EnterCommand or ExitCommand, checked recursively through
+// Subcommands, "admin" and "configure terminal" for instance, in this
+// project's own shipped tree. tree itself is never mutated, and
+// neither is any Command value already inside it; a Command that
+// needs a smaller Subcommands map is copied first, never edited in
+// place, since the very same pointer, see MergeTrees's own doc
+// comment, is very likely still reachable from whichever Command
+// Level actually owns it.
+//
+// This exists because a level switching command only ever makes
+// sense from the one exact Command Level RequireCurrentCommandLevel
+// actually checks against, a session's real current position, never
+// from a level reached underneath that one, config or config
+// interface stacked on top of exec for instance. InheritParent's own
+// job is carrying an ordinary command, "show" for instance, forward
+// so it stays available at every level reached from there on,
+// matching a real Cisco or HP privileged exec. A level switching
+// command is structurally different: it exists to move a session
+// between two exact levels, and inheriting it any further only
+// leaves it sitting in a listing where typing it can never succeed,
+// refused every time by RequireCurrentCommandLevel with a "you must
+// be in %s mode first" a session had no way to have expected, since
+// the command was offered to it in the first place. Excluding it
+// here, at the one place InheritParent actually happens, means every
+// simple Command Level manifest, most of them, that never sets
+// InheritParent at all, or that inherits from a level with no
+// EnterCommand or ExitCommand of its own, sees no behavior change
+// whatsoever.
+//
+// This is called once per InheritParent merge, LoadTreeStructure's
+// own job, always against a level's Parent's already fully resolved
+// raw tree, never against a level's own TreeFile contents; a level
+// keeps its own declared commands, level switching or not, exactly
+// as declared, this only ever trims what a further descendant would
+// otherwise also inherit.
+//
+// A container command, one with Subcommands but no Run of its own,
+// "configure" in this project's own shipped tree for instance, is
+// dropped entirely once filtering leaves it with no Subcommands and
+// no Run left at all, rather than surviving as an empty, unusable
+// stub a session could resolve to but never actually run anything
+// through.
+func filterLevelSwitchCommands(tree map[string]*Command, switchNames map[string]bool) map[string]*Command {
+	if len(switchNames) == 0 {
+		return tree
+	}
+	out := make(map[string]*Command, len(tree))
+	for name, cmd := range tree {
+		if cmd.Run != "" && switchNames[cmd.Run] {
+			continue
+		}
+		effective := cmd
+		if len(cmd.Subcommands) > 0 {
+			filteredSub := filterLevelSwitchCommands(cmd.Subcommands, switchNames)
+			if len(filteredSub) != len(cmd.Subcommands) {
+				if cmd.Run == "" && len(filteredSub) == 0 {
+					continue
+				}
+				copyCmd := *cmd
+				copyCmd.Subcommands = filteredSub
+				effective = &copyCmd
+			}
+		}
+		out[name] = effective
+	}
+	return out
 }
 
 // RequireCurrentCommandLevel - This function is the one place "you must

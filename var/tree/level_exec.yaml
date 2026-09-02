@@ -5,6 +5,10 @@ commands:
   show:
     desc_key: show.desc
     subcommands:
+      aliases:
+        desc_key: show.aliases.desc
+        pageable: true
+        run: show.aliases
       history:
         desc_key: show.history.desc
         pageable: true

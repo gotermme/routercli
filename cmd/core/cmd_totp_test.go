@@ -21,9 +21,10 @@ import (
 // and the finishTOTPEnable and finishTOTPDisable functions they
 // delegate to, without needing a real terminal. ctx.Users holds one
 // entry, keyed and named username, pointing at u, and ctx.UsersFile
-// points at a throwaway file in t.TempDir(), so a test that reaches
-// auth.SaveUsers writes somewhere real and can read it back with
-// auth.LoadUsers to confirm what was actually persisted.
+// points at a throwaway path in t.TempDir() that a test can os.Stat to
+// confirm neither function ever actually writes there, since enabling
+// or disabling TOTP only ever updates ctx.Users in memory, see
+// finishTOTPEnable's own doc comment.
 func newTOTPTestContext(t *testing.T, username string, u *auth.User) *command.AppContext {
 	t.Helper()
 	ctx := newTestContext()
@@ -82,12 +83,14 @@ func TestCurrentUserFalseWhenUsernameNotInUsers(t *testing.T) {
 //
 // ----------------------------------------------------------------------
 
-// TestFinishTOTPEnableSavesSecretOnValidCode - This test verifies
-// that a valid confirmation code sets user.TOTPSecret, persists it,
-// so a fresh auth.LoadUsers of ctx.UsersFile sees the same secret,
-// not just the in-memory copy, and reports true, telling the caller
-// enrollment actually completed.
-func TestFinishTOTPEnableSavesSecretOnValidCode(t *testing.T) {
+// TestFinishTOTPEnableUpdatesInMemoryOnly - This test verifies that a
+// valid confirmation code sets user.TOTPSecret, in memory, and reports
+// true, telling the caller enrollment actually completed. It never
+// touches ctx.UsersFile on disk at all, see this project's own
+// design-goals.md: only "write memory" persists an account change
+// like this one, so a reload or restart before that runs leaves TOTP
+// disabled again.
+func TestFinishTOTPEnableUpdatesInMemoryOnly(t *testing.T) {
 	user := &auth.User{Username: "alice", PasswordHash: "$0$alicepass"}
 	ctx := newTOTPTestContext(t, "alice", user)
 
@@ -111,13 +114,8 @@ func TestFinishTOTPEnableSavesSecretOnValidCode(t *testing.T) {
 	if user.TOTPSecret != secret {
 		t.Errorf("TOTPSecret = %q, want %q", user.TOTPSecret, secret)
 	}
-
-	loaded, err := auth.LoadUsers(ctx.UsersFile)
-	if err != nil {
-		t.Fatalf("failed to reload the saved users file: %v", err)
-	}
-	if loaded["alice"].TOTPSecret != secret {
-		t.Errorf("reloaded TOTPSecret = %q, want %q", loaded["alice"].TOTPSecret, secret)
+	if _, err := os.Stat(ctx.UsersFile); err == nil {
+		t.Error("expected no users file to be written until an explicit save runs")
 	}
 }
 
@@ -155,33 +153,6 @@ func TestFinishTOTPEnableRejectsInvalidCodeAndDoesNotSave(t *testing.T) {
 	}
 }
 
-// TestFinishTOTPEnableRollsBackOnSaveFailure - This test verifies
-// that a failed auth.SaveUsers call, here forced by pointing
-// ctx.UsersFile at a directory that does not exist, returns an error,
-// reports false rather than true, and rolls user.TOTPSecret back to
-// empty, so this session's own in-memory state never claims TOTP is
-// enabled when the write to disk actually failed.
-func TestFinishTOTPEnableRollsBackOnSaveFailure(t *testing.T) {
-	user := &auth.User{Username: "alice", PasswordHash: "$0$alicepass"}
-	ctx := newTOTPTestContext(t, "alice", user)
-	ctx.UsersFile = filepath.Join(t.TempDir(), "nonexistent-subdir", "users.yaml")
-
-	secret, _ := auth.GenerateTOTPSecret()
-	now := time.Now()
-	code, _ := auth.GenerateTOTPCode(secret, now)
-
-	enabled, err := finishTOTPEnable(ctx, user, secret, code, now)
-	if err == nil {
-		t.Fatal("expected an error when the users file cannot be saved, got nil")
-	}
-	if enabled {
-		t.Error("expected finishTOTPEnable to report false when the save failed")
-	}
-	if user.TOTPSecret != "" {
-		t.Errorf("expected TOTPSecret to be rolled back to empty after a failed save, got %q", user.TOTPSecret)
-	}
-}
-
 // ----------------------------------------------------------------------
 //
 // clearScreen
@@ -207,12 +178,13 @@ func TestClearScreenWritesANSIResetSequence(t *testing.T) {
 //
 // ----------------------------------------------------------------------
 
-// TestFinishTOTPDisableClearsSecretOnValidPasswordAndCode - This test
-// verifies that a correct account password together with a valid
-// current TOTP code clears user.TOTPSecret, persists that change, and
-// reports true, telling the caller the account is now actually
-// disabled.
-func TestFinishTOTPDisableClearsSecretOnValidPasswordAndCode(t *testing.T) {
+// TestFinishTOTPDisableClearsSecretInMemoryOnly - This test verifies
+// that a correct account password together with a valid current TOTP
+// code clears user.TOTPSecret, in memory, and reports true, telling
+// the caller the account is now actually disabled. It never touches
+// ctx.UsersFile on disk, the disable-side mirror of
+// TestFinishTOTPEnableUpdatesInMemoryOnly.
+func TestFinishTOTPDisableClearsSecretInMemoryOnly(t *testing.T) {
 	hash, err := auth.HashPassword("s3cret")
 	if err != nil {
 		t.Fatalf("HashPassword returned error: %v", err)
@@ -234,13 +206,8 @@ func TestFinishTOTPDisableClearsSecretOnValidPasswordAndCode(t *testing.T) {
 	if user.TOTPSecret != "" {
 		t.Errorf("expected TOTPSecret to be cleared, got %q", user.TOTPSecret)
 	}
-
-	loaded, err := auth.LoadUsers(ctx.UsersFile)
-	if err != nil {
-		t.Fatalf("failed to reload the saved users file: %v", err)
-	}
-	if loaded["alice"].TOTPSecret != "" {
-		t.Errorf("reloaded TOTPSecret = %q, want empty", loaded["alice"].TOTPSecret)
+	if _, err := os.Stat(ctx.UsersFile); err == nil {
+		t.Error("expected no users file to be written until an explicit save runs")
 	}
 }
 
@@ -291,33 +258,6 @@ func TestFinishTOTPDisableDeniedOnWrongCode(t *testing.T) {
 	}
 	if user.TOTPSecret != secret {
 		t.Errorf("expected TOTPSecret to remain unchanged after a wrong code, got %q", user.TOTPSecret)
-	}
-}
-
-// TestFinishTOTPDisableRollsBackOnSaveFailure - This test verifies
-// that a failed auth.SaveUsers call returns an error, reports false
-// rather than true, and rolls user.TOTPSecret back to its previous,
-// still-enabled value, the disable-side mirror of
-// TestFinishTOTPEnableRollsBackOnSaveFailure.
-func TestFinishTOTPDisableRollsBackOnSaveFailure(t *testing.T) {
-	hash, _ := auth.HashPassword("s3cret")
-	secret, _ := auth.GenerateTOTPSecret()
-	user := &auth.User{Username: "alice", PasswordHash: hash, TOTPSecret: secret}
-	ctx := newTOTPTestContext(t, "alice", user)
-	ctx.UsersFile = filepath.Join(t.TempDir(), "nonexistent-subdir", "users.yaml")
-
-	now := time.Now()
-	code, _ := auth.GenerateTOTPCode(secret, now)
-
-	disabled, err := finishTOTPDisable(ctx, user, "s3cret", code, now)
-	if err == nil {
-		t.Fatal("expected an error when the users file cannot be saved, got nil")
-	}
-	if disabled {
-		t.Error("expected finishTOTPDisable to report false when the save failed")
-	}
-	if user.TOTPSecret != secret {
-		t.Errorf("expected TOTPSecret to be rolled back after a failed save, got %q", user.TOTPSecret)
 	}
 }
 

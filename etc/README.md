@@ -97,7 +97,7 @@ This is the path and filename to the file defining the commands common to every 
 
 #### `StartupConfigFile`
 
-This is the path and filename `admin`'s own `copy running-config startup-config` and `erase startup-config` commands read and write, see `var/tree/README.md`'s own `admin` section. `show startup-config` reads the same file back out. The default is `var/startup-config/startup-config`, its own dedicated directory under `var/`, matching how `var/lang/` and `var/tree/` each get their own directory rather than sharing one general purpose `var/` catch-all. Both the filename and its location are fully controlled by this one setting; point it anywhere a deployment prefers. This file does not exist until something actually writes it, and RouterCLI treats a missing file the same as an empty one rather than an error.
+This is the path and filename `admin`'s own `write memory` and `erase startup-config` commands read and write, see `var/tree/README.md`'s own `admin` section. `show startup-config` reads the same file back out. No other command ever writes to this file; RouterCLI never lets a typed change survive a restart without `write memory` being run first. The default is `var/startup-config/startup-config`, its own dedicated directory under `var/`, matching how `var/lang/` and `var/tree/` each get their own directory rather than sharing one general purpose `var/` catch-all. Both the filename and its location are fully controlled by this one setting; point it anywhere a deployment prefers. This file does not exist until something actually writes it, and RouterCLI treats a missing file the same as an empty one rather than an error.
 
 RouterCLI also replays this file back in automatically, once, every time the process starts, before a session can even log in, the same way a real device applies its own saved configuration at boot before anyone can reach a prompt. This runs with no password prompting of its own, even for a Command Level that normally requires one: the trust here is not a credential typed at a terminal, since nobody has had the chance to type one yet, it is this process itself already having been allowed to run, and to read this file, by the operating system. Nothing recorded inside the file's own text, a `password manager hash <hash>` line included, is ever treated as proof of anything on its own; see `command.AppContext.ReplayingStartupConfig`'s own doc comment in `command/model.go`, and `loadStartupConfig` in `main.go`, for the full mechanism. A malformed or incompatible saved file, one naming a command that no longer exists for instance, fails the whole process at startup with a clear error rather than starting up in a silently, partially applied state.
 
@@ -121,6 +121,8 @@ NOTE: Here are the four (4) use cases for the sorting of Commands in a Command L
 #### `AuthRequired`
 
 This property determines whether a login prompt runs before the command loop starts. The default is `false`. When set to `false` the initial session login prompt never runs, and every session simply stays unauthenticated. This is independent of any Command Level or Command specific authentication requirements defined in the `password_hash` property for those Command Levels and Commands (see `var/tree/README.md`). A Command Level's own `password_hash`, or an individual Command's own `password_hash`, works exactly the same whether `AuthRequired` is `true` or `false`. Setting `AuthRequired` to `true` while both `EnableHostAuthentication` and `EnableCLIAuthentication` below are `false` is a hard error at startup, since there would then be no way to establish a session's identity.
+
+`AuthRequired` also decides whether any Command or Command Level's own `allowed_roles` property, see `var/tree/README.md`'s own Roles section, is enforced at all. This project exists as a library first, meant to be picked up with nothing configured yet and produce a genuinely usable, wide open command line. With `AuthRequired` left at its default `false`, this project's own shipped setting, no session anywhere has a real identity to hold a role against, so `allowed_roles` stays wide open everywhere, `admin` included, rather than locking a project builder out of a level they just declared in their own tree file. Turning `AuthRequired` on, whichever product built on this library does that, its own vendor, or its very first administrator, is the one moment `allowed_roles` starts to mean anything.
 
 #### `EnableHostAuthentication`
 
@@ -150,7 +152,7 @@ This property defines which entry in the `AuthProviders` should be used by `Enab
 
 #### `UsersFile`
 
-This is the path and filename for the multi-user login database. The default is `etc/users.yaml`. This is only used when `AuthRequired` is `true`.
+This is the path and filename for the multi-user login database. The default is `etc/users.yaml`. This is only used when `AuthRequired` is `true`. `account create`/`delete`, `account roles add`/`roles remove`, `password change`, and `totp enable`/`totp disable` all change only the current session's own in memory copy of this data; `write memory`, in the `admin` Command Level, is the one command that writes it back to this file, alongside `StartupConfigFile` above. A change nobody saved this way is gone the moment the process restarts.
 
 #### `LoginMaxAttempts`
 
@@ -196,11 +198,11 @@ This property defines how many times in a row the `password change` command lets
 
 #### `PagingEnabled`
 
-This property is the deployment wide switch for the interactive `--More--` pager. The default is `true`. It only ever applies to a command whose own tree entry sets `pageable: true`, see `var/tree/README.md`. Turning this off does not disable `| include`, `| exclude`, or `| begin` filtering itself, only the pause; a Pageable command's output is still filtered, it is simply written straight through afterward with no pause at all.
+This property is the deployment wide switch for the interactive `--More--` pager. The default is `true`. It only ever applies to a command whose own tree entry sets `pageable: true`, see `var/tree/README.md`. Turning this off does not disable `| include`, `| exclude`, or `| begin` filtering itself, only the pause; a Pageable command's output is still filtered, it is simply written straight through afterward with no pause at all. This value here is only the starting point at boot; `configure terminal`, then `line`, then `paging` or `no paging`, changes it at runtime, and, once saved, at every future boot too, without editing this file, see `README.md`'s own Output paging and filtering section.
 
 #### `DefaultPageLines`
 
-This property sets how many lines a session shows before pausing, used only when the real terminal's own height cannot be detected, a non-interactive session for instance, and no `terminal length` has been typed yet that session. The default is `24`. When the terminal's height can be detected, that real height, minus one line reserved for the `--More--` prompt itself, is used instead.
+This property sets how many lines a session shows before pausing, used only when the real terminal's own height cannot be detected, a non-interactive session for instance, and no `terminal length` has been typed yet that session. The default is `24`. When the terminal's height can be detected, that real height, minus one line reserved for the `--More--` prompt itself, is used instead. The same runtime override applies here as `PagingEnabled` above: `line`, then `length <0-512>`, changes this value without editing this file.
 
 #### `FilterMatchMode`
 
@@ -249,3 +251,5 @@ An optional boolean, `false` by default. When `true`, a session logging in as th
 ### Factory defaults
 
 `etc/defaults/` holds skeleton copies of `UsersFile` and `RolesFile`, restored over the live files by `restore-factory-defaults`, and, for `UsersFile` alone, by `erase users` too, both in the `admin` Command Level, see `var/tree/README.md`'s own roles section. The shipped copy seeds exactly one bootstrap account, holding this deployment's own reserved bypass role and a real, working, well-known password rather than an unusable placeholder, since `auth.LoadUsers` refuses any account with an empty password hash outright. `must_change_password` on that account forces it to be replaced with a real one the moment anyone actually logs in with it.
+
+This bootstrap account matters once a deployment turns `AuthRequired` on; see `AuthRequired`'s own entry above for why `admin`'s `allowed_roles` gate is not even enforced before that.

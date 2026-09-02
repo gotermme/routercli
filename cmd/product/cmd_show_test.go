@@ -8,6 +8,7 @@ package product
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -222,6 +223,10 @@ func showRoundTripLevels(t *testing.T) *command.TreeStructure {
         minargs: 1
         maxargs: 1
         run: set.description
+  alias:
+    minargs: 2
+    negatable: true
+    run: alias
 `)
 	configTree := loadTestTree(t, `commands:
   hostname:
@@ -243,6 +248,10 @@ func showRoundTripLevels(t *testing.T) *command.TreeStructure {
         minargs: 1
         maxargs: 1
         run: terminal.width
+  alias:
+    minargs: 2
+    negatable: true
+    run: alias
   exit:
     run: exit
   end:
@@ -257,6 +266,10 @@ func showRoundTripLevels(t *testing.T) *command.TreeStructure {
   shutdown:
     negatable: true
     run: interface.shutdown
+  alias:
+    minargs: 2
+    negatable: true
+    run: alias
   exit:
     run: exit
   end:
@@ -295,6 +308,16 @@ func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
 	state.Description = "a lab router"
 	state.Interface("eth0").Description = "uplink"
 	state.Interface("eth1").Shutdown = true
+	// One alias at every level this test's own three level tree
+	// actually reaches, exec, config, and config-if, exercised
+	// end to end alongside hostname and interface state, confirming
+	// each is written into, and read back out of, its own specific
+	// Command Level, not one flat, level-agnostic block the way
+	// Phase 32's own first version of this feature rendered it. See
+	// cmd_alias.go's own doc comment for why a level is never typed.
+	levels.ByName["exec"].Aliases = map[string][]string{"sh": {"show", "version"}}
+	levels.ByName["config"].Aliases = map[string][]string{"int": {"interface"}}
+	levels.ByName["config-if"].Aliases = map[string][]string{"desc": {"description"}}
 
 	lines := runningConfigLines(ctx, state)
 	joined := strings.Join(lines, "\n")
@@ -311,10 +334,29 @@ func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
 	if strings.Index(joined, "set description") > strings.Index(joined, "configure terminal") {
 		t.Errorf("expected the exec level \"set description\" line before \"configure terminal\", got:\n%s", joined)
 	}
+	if execIdx, cfgIdx := strings.Index(joined, "alias sh show version"), strings.Index(joined, "configure terminal"); execIdx == -1 || execIdx > cfgIdx {
+		t.Errorf("expected the exec level's own alias before \"configure terminal\", with no level named on the line itself, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "alias int interface") {
+		t.Errorf("expected the config level's own alias line, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "interface alias-replay-placeholder") {
+		t.Errorf("expected a placeholder interface entered to replay the config-if level's own alias, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "alias desc description") {
+		t.Errorf("expected the config-if level's own alias line, got:\n%s", joined)
+	}
 
 	replayCtx := newTestContext()
 	replayCtx.Levels = levels
 	replayCtx.Position = command.NewCommandLevelStack("exec", "", levels.ByName["exec"].Tree)
+	// Clear every level's own Aliases map first, so this replay proves
+	// the rendered text alone reconstructs them, not that they were
+	// simply left over from ctx and replayCtx sharing the same
+	// *command.CommandLevel values.
+	levels.ByName["exec"].Aliases = nil
+	levels.ByName["config"].Aliases = nil
+	levels.ByName["config-if"].Aliases = nil
 	replayConfigLines(t, replayCtx, lines)
 	replayState := replayCtx.State.(*ProductState)
 
@@ -336,8 +378,91 @@ func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
 			t.Errorf("replayed interface %q = %+v, want %+v", name, got, iface)
 		}
 	}
+	if got := levels.ByName["exec"].Aliases["sh"]; !reflect.DeepEqual(got, []string{"show", "version"}) {
+		t.Errorf("replayed exec alias \"sh\" = %v, want [show version]", got)
+	}
+	if got := levels.ByName["config"].Aliases["int"]; !reflect.DeepEqual(got, []string{"interface"}) {
+		t.Errorf("replayed config alias \"int\" = %v, want [interface]", got)
+	}
+	if got := levels.ByName["config-if"].Aliases["desc"]; !reflect.DeepEqual(got, []string{"description"}) {
+		t.Errorf("replayed config-if alias \"desc\" = %v, want [description]", got)
+	}
+	// The placeholder interface used solely to replay the config-if
+	// alias must never leave a real, visible interface behind, see
+	// configIfAliasReplayInterfaceName's own doc comment.
+	if _, exists := replayState.Interfaces[configIfAliasReplayInterfaceName]; exists {
+		t.Errorf("expected the config-if alias replay placeholder to leave no real interface behind, but %q exists", configIfAliasReplayInterfaceName)
+	}
 	if replayCtx.Position.Current().Name != "exec" {
 		t.Errorf("expected the replayed session to land back at exec (from \"end\"), got %q", replayCtx.Position.Current().Name)
+	}
+}
+
+// TestRunningConfigLinesWrapsAdminAndDiagnosticAliasesWithTheirOwnEnterAndExitWords
+// - This test verifies runningConfigLines' own handling of a Command
+// Level reached by swapping the whole root frame in place, see
+// command.EnterCommandLevel and command.ExitCommandLevel, admin and
+// diagnostic in this project's own shipped tree, rather than pushing a
+// nested frame the way config does. exec's own alias needs no wrapper
+// at all, this whole file already assumes a session is standing there;
+// admin and diagnostic each need their own real enter and exit words,
+// discovered through levelEnterWords and levelExitWords, "admin" and
+// "return", or "diagnostic-mode" and "exit-diagnostic-mode", wrapped
+// around their own alias lines.
+func TestRunningConfigLinesWrapsAdminAndDiagnosticAliasesWithTheirOwnEnterAndExitWords(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"exec": {Name: "exec", Aliases: map[string][]string{"sh": {"show"}}, Tree: map[string]*command.Command{
+			"admin":           {Run: "admin"},
+			"diagnostic-mode": {Run: "diagnostic-mode"},
+		}},
+		"admin": {Name: "admin", Parent: "exec", EnterCommand: "admin", ExitCommand: "return.admin",
+			Aliases: map[string][]string{"wr": {"copy", "running-config", "startup-config"}},
+			Tree:    map[string]*command.Command{"return": {Run: "return.admin"}},
+		},
+		"diagnostic": {Name: "diagnostic", Parent: "exec", EnterCommand: "diagnostic-mode", ExitCommand: "exit-diagnostic-mode",
+			Aliases: map[string][]string{"ping6": {"ping", "ipv6"}},
+			Tree:    map[string]*command.Command{"exit-diagnostic-mode": {Run: "exit-diagnostic-mode"}},
+		},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := runningConfigLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "\nalias sh show\n") {
+		t.Errorf("expected exec's own alias with no enter or exit words around it, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "admin\nalias wr copy running-config startup-config\nreturn") {
+		t.Errorf("expected admin's own alias wrapped with \"admin\" ... \"return\", got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "diagnostic-mode\nalias ping6 ping ipv6\nexit-diagnostic-mode") {
+		t.Errorf("expected diagnostic's own alias wrapped with \"diagnostic-mode\" ... \"exit-diagnostic-mode\", got:\n%s", joined)
+	}
+}
+
+// TestRunningConfigLinesOmitsAdminBlockWhenAdminHasNoAliases - This
+// test verifies that wrappedLevelAliasLines contributes nothing at
+// all, not even an empty enter, exit pair, once admin has no aliases
+// of its own defined, the same "nothing configured, nothing shown"
+// convention this whole file already follows everywhere else.
+func TestRunningConfigLinesOmitsAdminBlockWhenAdminHasNoAliases(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"exec": {Name: "exec", Tree: map[string]*command.Command{
+			"admin": {Run: "admin"},
+		}},
+		"admin": {Name: "admin", Parent: "exec", EnterCommand: "admin", ExitCommand: "return.admin",
+			Tree: map[string]*command.Command{"return": {Run: "return.admin"}},
+		},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := runningConfigLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "admin") {
+		t.Errorf("expected no admin block at all when admin has no aliases, got:\n%s", joined)
 	}
 }
 
@@ -449,6 +574,257 @@ func TestConfigModeLinesRevealsVendorDefinedHashWhenSessionGrantsReveal(t *testi
 	}
 	if strings.Contains(joined, "<HIDDEN>") {
 		t.Errorf("expected no \"<HIDDEN>\" placeholder while sitting in su-config, got:\n%s", joined)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// configModeLines, alias rendering
+//
+// ----------------------------------------------------------------------
+
+// TestConfigModeLinesRendersConfigLevelAliasAsAPasteableCommand - This
+// test verifies that config's own runtime defined alias, see
+// command.CommandLevel.Aliases and cmd/core/cmd_alias.go, renders
+// directly, as a literal "alias <name> <word...>" line with no level
+// named on it, the exact command a session standing in config mode, or
+// command.LoadStartupConfig replaying a saved startup-config at boot,
+// would type to define it again. configModeLines only ever renders
+// config's own aliases this way, flat, with no enter or exit words of
+// its own, since the whole function already runs inside a "configure
+// terminal" paste; see runningConfigLines for exec, admin, and
+// diagnostic, each of which needs its own wrapping instead.
+func TestConfigModeLinesRendersConfigLevelAliasAsAPasteableCommand(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"config": {Name: "config", Aliases: map[string][]string{
+			"sh": {"show", "version"},
+		}},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "alias sh show version") {
+		t.Errorf("expected an \"alias sh show version\" line, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesRendersConfigLevelAliasesSortedByName - This
+// test verifies that more than one alias defined at the config level
+// renders sorted alphabetically by alias name, the same stability
+// aliasesLines in cmd/core/cmd_show.go already gives "show aliases".
+func TestConfigModeLinesRendersConfigLevelAliasesSortedByName(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"config": {Name: "config", Aliases: map[string][]string{
+			"wr": {"copy", "running-config", "startup-config"},
+			"sh": {"show"},
+		}},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	shIdx := strings.Index(joined, "alias sh show")
+	wrIdx := strings.Index(joined, "alias wr copy running-config startup-config")
+	if shIdx == -1 || wrIdx == -1 {
+		t.Fatalf("expected both alias lines to be present, got:\n%s", joined)
+	}
+	if shIdx > wrIdx {
+		t.Errorf("expected \"sh\" to render before \"wr\" (alphabetical), got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesOmitsAliasBlockWhenNoAliasIsDefined - This test
+// verifies that a level with a nil or empty Aliases map, the state
+// every level starts in, contributes no "alias" line at all, the same
+// "nothing configured, nothing shown" convention this function
+// already follows for an untouched interface.
+func TestConfigModeLinesOmitsAliasBlockWhenNoAliasIsDefined(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"config": {Name: "config"},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "alias ") {
+		t.Errorf("expected no \"alias\" line when nothing is defined, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesRendersConfigIfAliasThroughPlaceholderInterface -
+// This test verifies that a config-if scoped alias, only ever
+// definable while a session is actually standing inside "interface
+// <name>" mode, is replayed back in by entering
+// configIfAliasReplayInterfaceName, never one of the real, already
+// configured interface names, since the alias itself belongs to the
+// whole config-if level, not to any one interface. See
+// cmd_interface.go's own doc comment for why entering and leaving
+// config-if this way touches no interface state.
+func TestConfigModeLinesRendersConfigIfAliasThroughPlaceholderInterface(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"config": {Name: "config", Tree: map[string]*command.Command{
+			"interface": {Run: "interface"},
+		}},
+		"config-if": {Name: "config-if", Parent: "config", EnterCommand: "interface"},
+	}}
+	ctx.Levels.ByName["config-if"].Aliases = map[string][]string{"desc": {"description"}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "interface "+configIfAliasReplayInterfaceName) {
+		t.Errorf("expected the placeholder interface to be entered, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "alias desc description") {
+		t.Errorf("expected the config-if level's own alias line, got:\n%s", joined)
+	}
+	if _, exists := state.Interfaces[configIfAliasReplayInterfaceName]; exists {
+		t.Error("expected rendering alone to never create a real interface entry")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// configModeLines, "line" mode rendering (item 11)
+//
+// ----------------------------------------------------------------------
+
+// TestConfigModeLinesOmitsLineBlockWhenNothingIsSet - This test
+// verifies that a ProductState.Line with every field left nil, the
+// state every deployment starts in, contributes no "line" block at
+// all, the same "nothing configured, nothing shown" convention this
+// function already follows for hostname, banners, and interfaces.
+func TestConfigModeLinesOmitsLineBlockWhenNothingIsSet(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "line") {
+		t.Errorf("expected no \"line\" block when nothing is set, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesRendersLineBlockWithEverySetField - This test
+// verifies that "line length", "line width", and "line paging" each
+// render as their own indented line inside a "line" block, in the
+// same shape a session, or a saved startup-config replayed at boot,
+// would type them.
+func TestConfigModeLinesRendersLineBlockWithEverySetField(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	state := ctx.State.(*ProductState)
+	length, width, paging := 30, 100, false
+	state.Line = LineDefaults{Length: &length, Width: &width, Paging: &paging}
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{"line", " length 30", " width 100", " no paging"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, joined)
+		}
+	}
+}
+
+// TestConfigModeLinesRendersLineBlockWithOnlyOneFieldSet - This test
+// verifies that a ProductState.Line with only one field ever set,
+// Length here, renders only that one line inside the "line" block,
+// with no "width" or "paging" line invented for the two fields still
+// left nil.
+func TestConfigModeLinesRendersLineBlockWithOnlyOneFieldSet(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	state := ctx.State.(*ProductState)
+	length := 40
+	state.Line = LineDefaults{Length: &length}
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, " length 40") {
+		t.Errorf("expected \" length 40\" in output, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "width") || strings.Contains(joined, "paging") {
+		t.Errorf("expected no \"width\" or \"paging\" line, got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesRendersConfigLineAliasInsideTheSameBlock - This
+// test verifies that a config-line scoped alias renders inside the
+// same enter, exit block as length, width, and paging, rather than a
+// separate block of its own, since config-line, unlike config-if, is
+// only ever one single, deployment wide instance; there is no reason
+// to enter and leave it twice. This also confirms the "line" block
+// itself is rendered even when every one of Length, Width, and Paging
+// is left nil, so long as config-line has at least one alias defined.
+func TestConfigModeLinesRendersConfigLineAliasInsideTheSameBlock(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"config-line": {Name: "config-line", Aliases: map[string][]string{
+			"pg": {"paging"},
+		}},
+	}}
+	state := ctx.State.(*ProductState)
+
+	lines := configModeLines(ctx, state)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "line\n alias pg paging") {
+		t.Errorf("expected the config-line alias inside the same block as \"line\", got:\n%s", joined)
+	}
+}
+
+// TestConfigModeLinesExitsTheLastInterfaceBeforeLineBlock - This test
+// verifies the correctness fix this function's own doc comment on
+// hasLineBlock describes: when both an interface block and a "line"
+// block are present, the last interface block gets its own trailing
+// "exit" too, even though it would otherwise be the very last block
+// and skip it, since cmd/product/cmd_line.go's own "line" command
+// only accepts running from exactly config mode, not still nested
+// inside a previous interface's own config-if mode.
+func TestConfigModeLinesExitsTheLastInterfaceBeforeLineBlock(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	state := ctx.State.(*ProductState)
+	state.Interface("eth0").Description = "uplink"
+	length := 30
+	state.Line = LineDefaults{Length: &length}
+
+	lines := configModeLines(ctx, state)
+
+	interfaceIdx := -1
+	lineIdx := -1
+	exitBetween := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "interface ") {
+			interfaceIdx = i
+		}
+		if line == "line" {
+			lineIdx = i
+		}
+	}
+	if interfaceIdx == -1 || lineIdx == -1 {
+		t.Fatalf("expected both an \"interface\" line and a \"line\" line, got: %v", lines)
+	}
+	for i := interfaceIdx + 1; i < lineIdx; i++ {
+		if lines[i] == "exit" {
+			exitBetween = true
+		}
+	}
+	if !exitBetween {
+		t.Errorf("expected an \"exit\" line between the interface block and the line block, got: %v", lines)
 	}
 }
 

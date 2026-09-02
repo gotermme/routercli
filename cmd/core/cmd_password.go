@@ -224,13 +224,12 @@ func verifyReauth(provider auth.AuthProvider, user *auth.User, password, code st
 // retyped its own current password by mistake.
 //
 // On success, user.PasswordHash is replaced with a freshly bcrypt
-// hashed value and persisted with auth.SaveUsers immediately, using
-// ctx.UsersFile, the same path ctx.Users was originally loaded from.
-// If that save fails, the in-memory change is rolled back, the same
-// rollback finishTOTPEnable and finishTOTPDisable already perform for
-// their own save failures, so this session's own state does not claim
-// the password changed when the users file on disk still says
-// otherwise.
+// hashed value, in memory only. Nothing here ever touches
+// ctx.UsersFile on disk; a session, "write memory" or "copy
+// running-config startup-config", must explicitly ask for that
+// separately, see design-goals.md's own core design goal on this. A
+// process that reloads or restarts before that happens goes right
+// back to whatever password ctx.UsersFile last held.
 //
 // The returned bool tells runPasswordChange whether the change
 // actually completed, the same reason finishTOTPEnable and
@@ -256,20 +255,20 @@ func finishPasswordChange(ctx *command.AppContext, user *auth.User, newPassword,
 		return false, err
 	}
 
-	previous := user.PasswordHash
-	previousMustChange := user.MustChangePassword
 	user.PasswordHash = hash
 	// A successful change, forced or voluntary, always clears a
 	// pending forced-change flag, see User.MustChangePassword's own
 	// doc comment. This account has just proven a real password of
 	// its own choosing, so there is nothing left to force.
 	user.MustChangePassword = false
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		user.PasswordHash = previous
-		user.MustChangePassword = previousMustChange
-		return false, err
-	}
-
+	// This only ever changes user.PasswordHash and
+	// user.MustChangePassword, in memory, never ctx.UsersFile on disk.
+	// See design-goals.md's own "nothing survives a restart without an
+	// explicit save" core design goal: a password changed here, this
+	// account's own included, reverts to whatever ctx.UsersFile last
+	// held the next time this deployment reloads or restarts, unless a
+	// session explicitly runs "write memory" or a future equivalent
+	// first.
 	ctx.Logger.Debugln("DEBUG: password changed for user", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("password.change.confirm"))
 	return true, nil

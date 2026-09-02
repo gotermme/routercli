@@ -35,6 +35,17 @@ package product
 // width as strictly session scoped, never written to running-config or
 // startup-config, so neither one has any business living alongside a
 // value "show running-config" reports back.
+//
+// Line, item 11 of the Framework Gap Roadmap, is a different thing
+// entirely, and does belong here: not a session's own live override,
+// but the deployment wide default a fresh session with no override of
+// its own falls back to, "line length" standing in for what real
+// Cisco and HP configure through "line vty" and "line console"
+// instead. See LineDefaults's own doc comment and
+// cmd/product/cmd_line.go for how a value set here reaches
+// command.AppContext.DefaultPageLines, DefaultTerminalWidth, and
+// PagingEnabled, both immediately and, once saved, again at every
+// future boot.
 type ProductState struct {
 	Description string
 	Hostname    string
@@ -51,6 +62,39 @@ type ProductState struct {
 	// at all, exactly like an interface with no Description ever set.
 	BannerMOTD  string
 	BannerLogin string
+
+	// Line holds "line" mode's own persisted defaults, see
+	// LineDefaults and cmd_line.go. Its zero value, every field nil,
+	// is the correct state for a deployment where nobody has ever
+	// entered "line" mode at all, leaving every one of
+	// etc/routercli.yaml's own config file driven defaults completely
+	// untouched.
+	Line LineDefaults
+}
+
+// LineDefaults - This type holds "line" mode's own three settings,
+// item 11 of the Framework Gap Roadmap: Length and Width, the
+// deployment wide fallback command.AppContext.DefaultPageLines and
+// DefaultTerminalWidth fall back to, see paging.EffectivePageLines and
+// paging.EffectiveTerminalWidth, only when a session's own live
+// override, "terminal length" or "terminal width" typed this session,
+// is unset and the real terminal's own size cannot be auto-detected
+// either; and Paging, the deployment wide switch for whether the
+// interactive pager runs at all, command.AppContext.PagingEnabled.
+//
+// Each field is a pointer, nil meaning "line length", "line width",
+// or "line paging" has never actually been typed and saved, so
+// main.go leaves this deployment's own config file driven default
+// completely alone rather than every fresh boot silently overwriting
+// it with some zero value nobody actually chose. This is the same
+// nil-means-unset convention command.AppContext.PageLines and
+// TerminalWidth themselves already use for a session's own live
+// override, applied here one level up, to a deployment's own default
+// rather than one session's own choice.
+type LineDefaults struct {
+	Length *int
+	Width  *int
+	Paging *bool
 }
 
 // InterfaceState - This type holds the per-interface values config-if

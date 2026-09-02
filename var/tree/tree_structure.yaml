@@ -43,6 +43,20 @@ trees:
     # ModeFrame.Context. This manifest deliberately knows nothing
     # about that, only the bare command name.
 
+  config-line:
+    tree_file: var/tree/level_config_line.yaml
+    parent: config
+    inherit_parent: true
+    prompt_suffix: "(config-line)"
+    enter_command: line
+    # No exit_command, same reasoning as config above. This is item 11
+    # of the Framework Gap Roadmap, cmd/product/cmd_line.go, a single,
+    # deployment wide default for terminal length, width, and paging,
+    # standing in for what a real Cisco or HP device configures through
+    # two separate modes, "line vty" and "line console", see that
+    # file's own doc comment for why this project keeps just one for
+    # now.
+
   user:
     tree_file: var/tree/level_user.yaml
     parent: base
@@ -64,16 +78,24 @@ trees:
     exit_command: return.admin
     # This level replaces what used to be a separate level named
     # su-config. Its own "show running-config", "show startup-config",
-    # "copy running-config startup-config", and "erase startup-config"
-    # commands, and both properties below, moved here unchanged; see
-    # var/tree/README.md's own admin section for the full reasoning,
-    # including why an account administrator needs exactly the same
-    # visibility su-config existed to provide.
+    # and "erase startup-config" commands, and both properties below,
+    # moved here unchanged; see var/tree/README.md's own admin section
+    # for the full reasoning, including why an account administrator
+    # needs exactly the same visibility su-config existed to provide.
+    # su-config's own "copy running-config startup-config" did not
+    # move here the same way, retired in favor of "write memory" alone.
     #
     # allowed_roles gates entry to this level to whichever role in
-    # var/tree/roles.yaml is marked bypass: true, so only a
-    # deployment's own seeded bootstrap account can reach it out of
-    # the box. See RoleSet.BypassRole and var/tree/roles.yaml.
+    # var/tree/roles.yaml is marked bypass: true, once this
+    # deployment's own AuthRequired, in etc/routercli.yaml, is turned
+    # on. Until then, AuthRequired off, this project's own shipped,
+    # zero setup default, allowed_roles is not enforced at all, and
+    # admin stays reachable by anyone, the same as every other level,
+    # since a library with nothing configured yet must not lock its
+    # own builder out of a level they just declared. See
+    # command.Authorized's own doc comment for the full reasoning, and
+    # RoleSet.BypassRole and var/tree/roles.yaml for what allowed_roles
+    # actually grants once AuthRequired is on.
     #
     # grants_replay_trust: a real, live credential check succeeding
     # here, whether or not a password was ever configured, in

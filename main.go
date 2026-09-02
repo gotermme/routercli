@@ -115,32 +115,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "failed to load tree structure:", err)
 		os.Exit(1)
 	}
-	// Every Command Level in the manifest is loaded and validated,
-	// including its "run:" handler references, right here at startup.
-	// A broken level_config_if.yaml fails the program immediately, not
-	// the first time someone actually types "interface eth0" days from
-	// now. This covers every level uniformly, root swap or nested.
-	// Nothing here names "config" or "config-if" specifically. Adding
-	// a level to tree_structure.yaml gets it loaded and validated the
-	// same way with zero code changes, beyond the one small cmd_*.go
-	// file, in cmd/core or cmd/product, every level's enter and exit
-	// command always needs. See command/treestructure.go's own top of
-	// file comment.
+	// Every Command Level in the manifest is loaded and validated, including
+	// its "run:" handler references, right here at startup. A broken
+	// level_config_if.yaml fails the program immediately, not the first time
+	// someone actually types "interface eth0" days from now. This covers every
+	// level uniformly, root swap or nested. Nothing here names "config" or
+	// "config-if" specifically. Adding a level to tree_structure.yaml gets it
+	// loaded and validated the same way with zero code changes, beyond the one
+	// small cmd_*.go file, in cmd/core or cmd/product, every level's enter and
+	// exit command always needs. See command/treestructure.go's own top of file
+	// comment.
 
-	// A command whose own feature is turned off in configuration is
-	// pruned out of every level's Tree entirely, right here, before
-	// anything else touches these trees, rate limiter wiring included,
-	// so a disabled command never shows up in help, tab completion, or
-	// VerifyCommandLevels below, rather than existing and refusing.
-	// See command.PruneDisabledCommands's own doc comment and
-	// var/tree/level_user.yaml, which sets requires: totp and
-	// requires: password_change on its own two container commands.
-	// featureFlags is the complete set of flag names any tree file in
-	// this project is allowed to reference through requires:, a naming
-	// convention private to this file, not something package command
-	// itself defines. Adding a new gated feature later means adding
-	// its own entry here, naming whichever SystemConfig boolean
-	// actually controls it.
+	// A command whose own feature is turned off in configuration is pruned out
+	// of every level's Tree entirely, right here, before anything else touches
+	// these trees, rate limiter wiring included, so a disabled command never
+	// shows up in help, tab completion, or VerifyCommandLevels below, rather
+	// than existing and refusing. See command.PruneDisabledCommands's own doc
+	// comment and var/tree/level_user.yaml, which sets requires: totp and
+	// requires: password_change on its own two container commands. featureFlags
+	// is the complete set of flag names any tree file in this project is
+	// allowed to reference through requires:, a naming convention private to
+	// this file, not something package command itself defines. Adding a new
+	// gated feature later means adding its own entry here, naming whichever
+	// SystemConfig boolean actually controls it.
+	//
 	featureFlags := map[string]bool{
 		"totp":            config.EnableTOTPAuthentication,
 		"password_change": config.EnableCLIAuthentication,
@@ -317,6 +315,16 @@ func main() {
 		StartupConfigFile: config.StartupConfigFile,
 		RolesFile:         config.RolesFile,
 		DefaultsDir:       config.DefaultsDir,
+		// AuthRequired is copied straight from config here as well, the
+		// same treatment RolesFile just above gets, so command.Authorized
+		// can tell whether this deployment has authentication turned on
+		// at all. See command.AppContext.AuthRequired's own doc comment.
+		AuthRequired: config.AuthRequired,
+		// ReloadScheduler backs "reload <seconds>" and "reboot
+		// <seconds>", see cmd/core/cmd_admin.go and
+		// command.AppContext.ReloadScheduler's own doc comment.
+		// Constructed once, here, for the life of this connection.
+		ReloadScheduler: command.NewPendingReload(),
 	}
 
 	// StartupConfigFile's own directory is created unconditionally,
@@ -324,11 +332,11 @@ func main() {
 	// regardless of whether a startup-config has ever actually been
 	// saved yet, since StartupConfigFile always has a real default,
 	// see the field's own assignment right above. This is not
-	// strictly required for command.LoadStartupConfig below, a missing file
-	// is not an error either way, but it means the directory a first
-	// "copy running-config startup-config" needs is already there
-	// from the very first run, rather than only appearing the moment
-	// something is actually saved.
+	// strictly required for command.LoadStartupConfig below, a missing
+	// file is not an error either way, but it means the directory a
+	// first "write memory" needs is already there from the very first
+	// run, rather than only appearing the moment something is actually
+	// saved.
 	if err := mkdirForFile(ctx.StartupConfigFile); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to prepare startup-config directory:", err)
 		os.Exit(1)
@@ -357,6 +365,27 @@ func main() {
 	// ProductState.BannerMOTD's own doc comment.
 	if state, ok := ctx.State.(*product.ProductState); ok {
 		printBanner(state.BannerMOTD)
+
+		// state.Line, replayed the same way BannerMOTD just was, holds
+		// item 11 of the Framework Gap Roadmap's own persistent "line"
+		// mode defaults, see cmd/product/cmd_line.go and
+		// ProductState.Line's own doc comment. Each field left nil
+		// here, "line length" for instance never having been typed or
+		// saved, leaves the matching ctx field exactly as
+		// config.DefaultPageLines, config.PagingEnabled, or
+		// AppContext's own zero value for DefaultTerminalWidth already
+		// set it a few lines above, so an unconfigured "line" mode
+		// changes nothing about this deployment's existing, config
+		// file driven defaults.
+		if state.Line.Length != nil {
+			ctx.DefaultPageLines = *state.Line.Length
+		}
+		if state.Line.Width != nil {
+			ctx.DefaultTerminalWidth = *state.Line.Width
+		}
+		if state.Line.Paging != nil {
+			ctx.PagingEnabled = *state.Line.Paging
+		}
 	}
 
 	if config.AuthRequired {
@@ -871,7 +900,19 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 	for {
 		var line string
 		var err error
-		if opts.SessionIdleTimeout > 0 {
+		{
+			// The blocking read always runs in its own goroutine, not
+			// just when opts.SessionIdleTimeout is set, so this select
+			// can also race it against ctx.ReloadScheduler firing, see
+			// AppContext.ReloadScheduler's own doc comment. A scheduled
+			// "reload <seconds>" or "reboot <seconds>" can be armed at
+			// any point during an already running session, unlike
+			// opts.SessionIdleTimeout, fixed for the whole session
+			// before this loop ever starts, so there is no equivalent
+			// "only bother select-ing when it matters" shortcut
+			// available here; every iteration must be able to notice a
+			// fire, not only the ones that happen to start after one
+			// was already scheduled.
 			type readResult struct {
 				line string
 				err  error
@@ -881,10 +922,30 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				l, e := rl.Readline()
 				resultCh <- readResult{l, e}
 			}()
+
+			// idleCh is left nil, and therefore never selected, see the
+			// Go language specification on a nil channel in a select
+			// statement, whenever opts.SessionIdleTimeout is zero,
+			// preserving this project's original "idle timeout off by
+			// default" behavior exactly.
+			var idleCh <-chan time.Time
+			if opts.SessionIdleTimeout > 0 {
+				idleCh = time.After(opts.SessionIdleTimeout)
+			}
+			// reloadFireCh is left nil the same way, only when
+			// ctx.ReloadScheduler itself is nil, the case in a hand
+			// built *command.AppContext, a test for instance, that
+			// never constructed one. A real ctx wired up through main
+			// above always sets this.
+			var reloadFireCh <-chan struct{}
+			if ctx.ReloadScheduler != nil {
+				reloadFireCh = ctx.ReloadScheduler.FireChannel()
+			}
+
 			select {
 			case res := <-resultCh:
 				line, err = res.line, res.err
-			case <-time.After(opts.SessionIdleTimeout):
+			case <-idleCh:
 				fmt.Println(ctx.Translator.T("runloop.idle_timeout"))
 				// os.Exit below terminates the process immediately, so
 				// SESSION END is logged right here rather than after
@@ -897,9 +958,29 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 					_ = term.Restore(opts.TerminalFD, opts.OrigTerminalState)
 				}
 				os.Exit(0)
+			case <-reloadFireCh:
+				// A scheduled "reload <seconds>" or "reboot <seconds>"
+				// just fired, uncancelled. This performs the exact same
+				// file re-reading work an immediate "reload" does, see
+				// core.ReloadFromDiskForRestart, then ends the
+				// connection the same direct way the idle timeout
+				// branch just above does, rather than returning
+				// command.ErrQuit through the ordinary dispatch path
+				// below: the goroutine reading rl.Readline() above may
+				// still be blocked waiting on real terminal input right
+				// now, with no portable way to cancel it, the same
+				// reasoning opts.SessionIdleTimeout's own doc comment
+				// gives in full.
+				fmt.Println(ctx.Translator.T("reload.timer_fired"))
+				if rerr := core.ReloadFromDiskForRestart(ctx); rerr != nil {
+					fmt.Fprintf(os.Stderr, "%% %v\n", rerr)
+				}
+				logSessionEnd(ctx)
+				if opts.OrigTerminalState != nil {
+					_ = term.Restore(opts.TerminalFD, opts.OrigTerminalState)
+				}
+				os.Exit(0)
 			}
-		} else {
-			line, err = rl.Readline()
 		}
 
 		if err == readline.ErrInterrupt {
@@ -958,6 +1039,18 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 			fmt.Printf("%% %v\n", perr)
 			continue
 		}
+
+		// Runtime defined command aliases, "alias <level> <name>
+		// <words...>", see cmd/core/cmd_alias.go, are expanded here,
+		// against cmdTokens[0] only, before either the "?" fallback
+		// below or command.Resolve itself ever sees this line. This
+		// runs after paging.SplitPipeline on purpose, so an alias can
+		// never itself swallow a "| include" style filter segment
+		// typed after it; only the command side of the line is ever
+		// checked against command.CommandLevel.Aliases. See
+		// command.ExpandAlias's own doc comment for why this is a
+		// single, non-recursive pass.
+		cmdTokens = command.ExpandAlias(ctx, cmdTokens)
 
 		// Defensive, non-interactive "?" fallback. Normally,
 		// readline.Listener's key == '?' branch, completer.go's

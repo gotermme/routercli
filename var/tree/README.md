@@ -53,6 +53,21 @@ every command inherited from its parent, recursively up the entire Tree
 Structure. The default is `false`. When set to `false` this Command Level
 contains only the commands listed in its own YAML file.
 
+One kind of command is deliberately left out of what gets carried
+forward this way: any command that is itself some other Command
+Level's own `enter_command` or `exit_command`, `admin` or `disable`
+in this project's own shipped tree for instance. Those commands
+require a session's real, current position to be one exact Command
+Level, checked by `command.RequireCurrentCommandLevel`, and inheriting
+one into a further descendant, `config` for instance, only leaves it
+sitting in that descendant's own listing where typing it can never
+succeed, refused every time with a confusing "you must be in X mode
+first," since the session never expected a command it was just shown
+to fail that way. A Command Level keeps every command declared
+directly in its own YAML file regardless of this, level switching or
+not; only what a further descendant would otherwise also inherit is
+trimmed.
+
 #### `enter_command`
 
 This property names the command that moves a session from the parent into this
@@ -169,8 +184,18 @@ after `RequireCurrentCommandLevel`, and before the password check. A
 Command Level MAY set either, both, or neither, and both are enforced when
 both are set. `admin`, the one level this project ships with
 `allowed_roles` set, is gated to this deployment's own reserved bypass
-role, see the roles section below, so only the account seeded with that
-role can reach it out of the box.
+role, see the roles section below.
+
+This gate is only actually enforced while `AuthRequired`, in
+`etc/routercli.yaml`, is `true`. With `AuthRequired` off, this
+project's own shipped, zero setup default, no session anywhere has a
+real identity to hold a role against in the first place, so
+`allowed_roles` stays wide open rather than locking a project builder
+out of a level they just declared in their own tree file, `admin`
+included. A deployment, its own vendor, or its very first
+administrator, turning `AuthRequired` on is what actually puts
+`allowed_roles` into effect. See `command.Authorized`'s own doc
+comment in `command/roles.go` for the full reasoning.
 
 #### `prompt_suffix`
 
@@ -248,9 +273,26 @@ start.
 
 #### `alias`
 
-This property creates an alias for and existing command. When set, this command
+This property creates an alias for an existing command. When set, this command
 becomes a pointer to another command name at the same level. Resolve() finds
 the alias's name automatically and that is executed instead.
+
+This is a build time concept, declared once in a tree YAML file by whoever
+builds a product on top of RouterCLI, `?` pointing at `help` in
+`level_common.yaml` being the one example this project ships. It is a
+different thing entirely from the runtime defined command alias a session,
+or an administrator, can create and remove while RouterCLI is running,
+`alias <alias> <word...>`, typed from whatever Command Level the alias
+should belong to, see `README.md`'s own Command Aliases section and
+`command.CommandLevel.Aliases`. The two happen to share an English name,
+and nothing else; a tree file's own `alias` property is never involved
+when the runtime `alias` command expands something a session actually
+typed. Unlike this build time property, the runtime `alias` command
+refuses to redefine a name that is already a defined runtime alias;
+`no alias <alias>` must remove it first, a deliberate security measure
+so a change to an already trusted alias can never happen silently in
+one step, see `README.md`'s own Command Aliases section for the full
+reasoning.
 
 #### `hidden`
 
@@ -305,7 +347,9 @@ meaning this property gates nothing at all. This is the Command
 counterpart to a Command Level's own `allowed_roles` above, checked in
 `main.go`'s own dispatch loop at the same point `password_hash` above is
 already checked, and independent of it the same way: a command MAY set
-either, both, or neither, and both are enforced when both are set.
+either, both, or neither, and both are enforced when both are set. The
+same `AuthRequired` dependency applies here too, see the Command
+Level's own `allowed_roles` entry above for the full reasoning.
 
 #### `minargs`
 
@@ -378,7 +422,10 @@ This property lists the nested subcommands reachable from this command.
 
 `RolesFile`, `var/tree/roles.yaml` by default, is where a deployment
 declares every role name it recognizes, for use in a Command or Command
-Level's own `allowed_roles` list elsewhere in `var/tree/`.
+Level's own `allowed_roles` list elsewhere in `var/tree/`. Declaring a
+role here, and referencing it in `allowed_roles`, only actually
+restricts anything once `AuthRequired`, in `etc/routercli.yaml`, is
+`true`. See the `allowed_roles` entries above for the full reasoning.
 
 ```yaml
 # var/tree/roles.yaml

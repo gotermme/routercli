@@ -4,11 +4,16 @@
 # bypass: true. See var/tree/README.md's own admin section.
 #
 # This level replaces what used to be a separate level named su-config.
-# Its "show running-config", "show startup-config", "copy running-config
-# startup-config", and "erase startup-config" commands moved here
-# unchanged, still registered by cmd/product/cmd_startup_config.go and
-# cmd/product/cmd_show.go, reused exactly as they already were. Every
-# other command below is new, registered by cmd/core/cmd_admin.go.
+# Its "show running-config", "show startup-config", and "erase
+# startup-config" commands moved here unchanged, still registered by
+# cmd/product/cmd_startup_config.go and cmd/product/cmd_show.go,
+# reused exactly as they already were. su-config's own "copy
+# running-config startup-config" did not move here the same way; it
+# was retired outright in favor of "write memory" alone, see
+# cmd/product/cmd_startup_config.go's own doc comment, so that saving
+# to disk is never a choice between two commands that almost, but not
+# quite, do the same thing. Every other command below is new,
+# registered by cmd/core/cmd_admin.go.
 
 commands:
   show:
@@ -23,15 +28,17 @@ commands:
         pageable: true
         run: show.startup-config
 
-  copy:
-    desc_key: copy.desc
+  write:
+    desc_key: write.desc
     subcommands:
-      running-config:
-        desc_key: copy.running_config.desc
-        subcommands:
-          startup-config:
-            desc_key: copy.running_config.startup_config.desc
-            run: copy.running-config.startup-config
+      memory:
+        desc_key: write.memory.desc
+        # The classic Cisco synonym for "copy running-config
+        # startup-config", extended here to also save every in memory
+        # change to the user database. See
+        # cmd/product/cmd_startup_config.go's own doc comment for the
+        # full reasoning.
+        run: write.memory
 
   erase:
     desc_key: erase.desc
@@ -56,10 +63,26 @@ commands:
 
   reload:
     desc_key: reload.desc
-    # Re-reads every persistent file from disk, rebuilds this
-    # session's own in-memory state from them, and ends the
-    # connection. See cmd/core/cmd_admin.go's own doc comment for why
-    # this cannot affect any other already connected session today.
+    arghelp_key: reload.arghelp
+    maxargs: 1
+    # With no argument, re-reads every persistent file from disk,
+    # rebuilds this session's own in-memory state from them, and ends
+    # the connection. With a delay, in seconds, schedules that same
+    # thing to happen on its own, unattended, and returns immediately,
+    # see cmd/core/cmd_admin.go's own doc comment for the full
+    # reasoning, including why this cannot affect any other already
+    # connected session today. "no reload" or "no reboot" cancels a
+    # scheduled reload.
+    negatable: true
+    run: reload
+
+  reboot:
+    desc_key: reboot.desc
+    arghelp_key: reload.arghelp
+    maxargs: 1
+    # A full synonym for "reload" above, sharing its exact same
+    # pending state, see cmd/core/cmd_admin.go.
+    negatable: true
     run: reload
 
   account:

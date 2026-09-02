@@ -40,9 +40,9 @@ import (
 // it takes is already a hashed value, in this project's own
 // "$id$encoded" storage form, see auth.HashPassword. This exists for
 // exactly one job: restoring a Command Level's secret from previously
-// saved configuration text, "show running-config" and
-// "copy running-config startup-config" among them, see
-// cmd/product/cmd_show.go, so a saved configuration can be pasted
+// saved configuration text, "show running-config" and "write memory"
+// among them, see cmd/product/cmd_show.go, so a saved configuration
+// can be pasted
 // back in and reproduce the exact same access it had before, without
 // ever needing to know, type, or reveal what the real, live password
 // actually was. Recording only what a stored secret equals, never

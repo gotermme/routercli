@@ -540,6 +540,86 @@ func TestRunReloadEndsTheConnection(t *testing.T) {
 	}
 }
 
+// TestRunReloadWithDelaySchedulesRatherThanEndingTheConnection - This
+// test verifies that "reload <seconds>" arms ctx.ReloadScheduler and
+// returns nil, rather than reloading immediately, leaving the current
+// connection running until either the delay elapses or "no reload"
+// cancels it.
+func TestRunReloadWithDelaySchedulesRatherThanEndingTheConnection(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.ReloadScheduler = command.NewPendingReload()
+	defer ctx.ReloadScheduler.Cancel()
+
+	if err := runReload(ctx, []string{"5"}); err != nil {
+		t.Fatalf("runReload returned unexpected error: %v", err)
+	}
+	if !ctx.ReloadScheduler.Pending() {
+		t.Error("expected ctx.ReloadScheduler.Pending() == true after \"reload 5\"")
+	}
+}
+
+// TestRunReloadWithInvalidDelayReturnsError - This test verifies that
+// "reload <seconds>" refuses a delay that is not a positive integer,
+// zero, negative, and non-numeric alike, without touching
+// ctx.ReloadScheduler at all.
+func TestRunReloadWithInvalidDelayReturnsError(t *testing.T) {
+	for _, delay := range []string{"0", "-5", "soon"} {
+		ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+		ctx.ReloadScheduler = command.NewPendingReload()
+
+		if err := runReload(ctx, []string{delay}); err == nil {
+			t.Errorf("runReload(%q) returned nil error, want an error", delay)
+		}
+		if ctx.ReloadScheduler.Pending() {
+			t.Errorf("runReload(%q) left a reload pending, want nothing scheduled", delay)
+		}
+	}
+}
+
+// TestRunReloadWithDelayButNoSchedulerReturnsError - This test
+// verifies that "reload <seconds>" fails cleanly, rather than
+// panicking on a nil ctx.ReloadScheduler, for a caller that never
+// wired one up, main.go's own AppContext construction being the only
+// real one that does.
+func TestRunReloadWithDelayButNoSchedulerReturnsError(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	if err := runReload(ctx, []string{"5"}); err == nil {
+		t.Error("expected an error when ctx.ReloadScheduler is nil")
+	}
+}
+
+// TestRunReloadNegatedCancelsPendingReload - This test verifies that
+// "no reload", ctx.Negated set true, cancels a reload "reload
+// <seconds>" had scheduled, returning nil and leaving nothing pending.
+func TestRunReloadNegatedCancelsPendingReload(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.ReloadScheduler = command.NewPendingReload()
+	ctx.ReloadScheduler.Schedule(time.Hour)
+
+	ctx.Negated = true
+	if err := runReload(ctx, nil); err != nil {
+		t.Fatalf("negated runReload returned unexpected error: %v", err)
+	}
+	if ctx.ReloadScheduler.Pending() {
+		t.Error("expected nothing pending after \"no reload\" cancelled it")
+	}
+}
+
+// TestRunReloadNegatedWithNothingPendingReturnsError - This test
+// verifies that "no reload" reports an error, matching
+// command.PendingReload.Cancel's own documented behavior, rather than
+// silently succeeding, when nothing was actually scheduled.
+func TestRunReloadNegatedWithNothingPendingReturnsError(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.ReloadScheduler = command.NewPendingReload()
+
+	ctx.Negated = true
+	if err := runReload(ctx, nil); err == nil {
+		t.Error("expected an error from \"no reload\" when nothing was pending")
+	}
+}
+
 // TestRunRestoreFactoryDefaultsRestoresAndReloads - This test
 // verifies the full recovery path: startup-config is erased, both
 // users.yaml and roles.yaml are restored from DefaultsDir, and the

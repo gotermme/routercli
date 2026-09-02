@@ -163,18 +163,21 @@ func TestEffectivePageLinesUsesRealTerminalHeightMinusOne(t *testing.T) {
 func TestEffectiveTerminalWidthReturnsOverrideExactly(t *testing.T) {
 	for _, want := range []int{0, 1, 80, 512} {
 		override := want
-		got := EffectiveTerminalWidth(int(os.Stdin.Fd()), &override)
+		got := EffectiveTerminalWidth(int(os.Stdin.Fd()), &override, 0)
 		if got != want {
 			t.Errorf("EffectiveTerminalWidth with override %d = %d, want %d unchanged", want, got, want)
 		}
 	}
 }
 
-// TestEffectiveTerminalWidthReturnsZeroWhenFDIsNotATerminal - This
+// TestEffectiveTerminalWidthReturnsFallbackWhenFDIsNotATerminal - This
 // test verifies that with no override and fd not a real terminal, an
-// ordinary os.Pipe here, zero is returned, the "cannot be determined"
-// convention this function documents for that case.
-func TestEffectiveTerminalWidthReturnsZeroWhenFDIsNotATerminal(t *testing.T) {
+// ordinary os.Pipe here, fallback is returned exactly as given, the
+// same "cannot be determined" convention EffectivePageLines already
+// falls back for, mirroring
+// TestEffectivePageLinesFallsBackWhenFDIsNotATerminal above for its
+// sibling function.
+func TestEffectiveTerminalWidthReturnsFallbackWhenFDIsNotATerminal(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("failed to open a pipe: %v", err)
@@ -182,9 +185,9 @@ func TestEffectiveTerminalWidthReturnsZeroWhenFDIsNotATerminal(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	got := EffectiveTerminalWidth(int(r.Fd()), nil)
-	if got != 0 {
-		t.Errorf("EffectiveTerminalWidth = %d, want 0", got)
+	got := EffectiveTerminalWidth(int(r.Fd()), nil, 132)
+	if got != 132 {
+		t.Errorf("EffectiveTerminalWidth = %d, want 132 (fallback)", got)
 	}
 }
 
@@ -198,7 +201,7 @@ func TestEffectiveTerminalWidthUsesRealTerminalWidth(t *testing.T) {
 		t.Fatalf("failed to set the pty's own size: %v", err)
 	}
 
-	got := EffectiveTerminalWidth(int(slave.Fd()), nil)
+	got := EffectiveTerminalWidth(int(slave.Fd()), nil, 0)
 	if got != 100 {
 		t.Errorf("EffectiveTerminalWidth = %d, want 100", got)
 	}
@@ -217,14 +220,14 @@ func TestEffectiveTerminalWidthReflectsAResizeWithNoStaleness(t *testing.T) {
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 80}); err != nil {
 		t.Fatalf("failed to set the pty's own initial size: %v", err)
 	}
-	if got := EffectiveTerminalWidth(int(slave.Fd()), nil); got != 80 {
+	if got := EffectiveTerminalWidth(int(slave.Fd()), nil, 0); got != 80 {
 		t.Fatalf("EffectiveTerminalWidth before resize = %d, want 80", got)
 	}
 
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 120}); err != nil {
 		t.Fatalf("failed to resize the pty: %v", err)
 	}
-	if got := EffectiveTerminalWidth(int(slave.Fd()), nil); got != 120 {
+	if got := EffectiveTerminalWidth(int(slave.Fd()), nil, 0); got != 120 {
 		t.Errorf("EffectiveTerminalWidth after resize = %d, want 120", got)
 	}
 }

@@ -15,28 +15,27 @@ import (
 	"github.com/gotermme/routercli/command"
 )
 
-// TestCopyRunningConfigStartupConfigWritesFile - This test verifies
-// that "copy running-config startup-config" writes runningConfigLines'
-// own output to ctx.StartupConfigFile, creating its parent directory
-// along the way, since a fresh temporary directory here never already
-// contains the "var/startup-config" style subdirectory a real
-// deployment would.
-func TestCopyRunningConfigStartupConfigWritesFile(t *testing.T) {
+// TestWriteMemoryWritesStartupConfigFile - This test verifies that
+// "write memory" writes runningConfigLines' own output to
+// ctx.StartupConfigFile, creating its parent directory along the way,
+// since a fresh temporary directory here never already contains the
+// "var/startup-config" style subdirectory a real deployment would.
+func TestWriteMemoryWritesStartupConfigFile(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Levels = &command.TreeStructure{}
 	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "var", "config", "startup-config")
 	state := ctx.State.(*ProductState)
 	state.Hostname = "myrouter"
 	state.Description = "a lab router"
-	cmd := loadTestCommand(t, "copy.running-config.startup-config")
+	cmd := loadTestCommand(t, "write.memory")
 
 	if err := cmd.RunFunc(ctx, nil); err != nil {
-		t.Fatalf("copy.running-config.startup-config handler returned unexpected error: %v", err)
+		t.Fatalf("write.memory handler returned unexpected error: %v", err)
 	}
 
 	got, err := os.ReadFile(ctx.StartupConfigFile)
 	if err != nil {
-		t.Fatalf("expected startup-config file to exist after copy, ReadFile returned: %v", err)
+		t.Fatalf("expected startup-config file to exist after write memory, ReadFile returned: %v", err)
 	}
 
 	want := strings.Join(runningConfigLines(ctx, state), "\n") + "\n"
@@ -45,26 +44,26 @@ func TestCopyRunningConfigStartupConfigWritesFile(t *testing.T) {
 	}
 }
 
-// TestCopyRunningConfigStartupConfigOverwritesExistingFile - This test
-// verifies that running "copy running-config startup-config" a second
-// time, after state has changed, replaces the file's own content
-// rather than appending to it, matching real Cisco and HP, both of
-// which always fully replace startup-config on a save.
-func TestCopyRunningConfigStartupConfigOverwritesExistingFile(t *testing.T) {
+// TestWriteMemoryOverwritesExistingStartupConfigFile - This test
+// verifies that running "write memory" a second time, after state has
+// changed, replaces the file's own content rather than appending to
+// it, matching real Cisco and HP, both of which always fully replace
+// startup-config on a save.
+func TestWriteMemoryOverwritesExistingStartupConfigFile(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Levels = &command.TreeStructure{}
 	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config")
 	state := ctx.State.(*ProductState)
 	state.Hostname = "first-name"
-	cmd := loadTestCommand(t, "copy.running-config.startup-config")
+	cmd := loadTestCommand(t, "write.memory")
 
 	if err := cmd.RunFunc(ctx, nil); err != nil {
-		t.Fatalf("first copy.running-config.startup-config call returned unexpected error: %v", err)
+		t.Fatalf("first write.memory call returned unexpected error: %v", err)
 	}
 
 	state.Hostname = "second-name"
 	if err := cmd.RunFunc(ctx, nil); err != nil {
-		t.Fatalf("second copy.running-config.startup-config call returned unexpected error: %v", err)
+		t.Fatalf("second write.memory call returned unexpected error: %v", err)
 	}
 
 	got, err := os.ReadFile(ctx.StartupConfigFile)
@@ -125,26 +124,28 @@ func TestEraseStartupConfigNonexistentFileIsNotError(t *testing.T) {
 
 // ----------------------------------------------------------------------
 //
-// copy running-config startup-config, execEnterWords prepending, and
-// the full cold boot round trip
+// write memory, execEnterWords prepending, and the full cold boot
+// round trip, base and user Command Levels included
 //
 // ----------------------------------------------------------------------
 
-// TestCopyRunningConfigStartupConfigPrependsExecEnterWords - This test
-// verifies the one difference between what "copy running-config
-// startup-config" writes and runningConfigLines' own raw output,
-// documented in this file's own init doc comment: when ctx.Levels
-// resolves a real "exec" level with a real Parent, "enable" is
-// prepended as its own leading line, ahead of everything
-// runningConfigLines itself produces. showRoundTripLevels, cmd_show_test.go,
-// only ever builds exec, config, and config-if, with no Parent at all
-// on exec, so this test builds its own small three level tree, base
-// and exec, with exec.Parent set to base and exec.EnterCommand set to
-// "enable", to actually exercise the prepending path
-// TestCopyRunningConfigStartupConfigWritesFile above deliberately does
-// not, since that test's own empty ctx.Levels leaves execEnterWords
-// with nothing to resolve.
-func TestCopyRunningConfigStartupConfigPrependsExecEnterWords(t *testing.T) {
+// TestWriteMemoryPrependsExecEnterWords - This test verifies the one
+// difference between what "write memory" writes and runningConfigLines'
+// own raw output for a bare exec-rooted state with no base or user
+// content: when ctx.Levels resolves a real "exec" level with a real
+// Parent, "enable" is prepended as its own leading line, ahead of
+// everything else runningConfigLines itself produces. This now
+// happens inside runningConfigLines itself, not as a separate step
+// writeRunningConfigToStartupConfig takes, see that function's own doc
+// comment. showRoundTripLevels, cmd_show_test.go, only ever builds
+// exec, config, and config-if, with no Parent at all on exec, so this
+// test builds its own small three level tree, base and exec, with
+// exec.Parent set to base and exec.EnterCommand set to "enable", to
+// actually exercise the prepending path
+// TestWriteMemoryWritesStartupConfigFile above deliberately does not,
+// since that test's own empty ctx.Levels leaves execEnterWords with
+// nothing to resolve.
+func TestWriteMemoryPrependsExecEnterWords(t *testing.T) {
 	baseTree := loadTestTree(t, `commands:
   enable:
     run: enable
@@ -157,10 +158,10 @@ func TestCopyRunningConfigStartupConfigPrependsExecEnterWords(t *testing.T) {
 	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config")
 	state := ctx.State.(*ProductState)
 	state.Hostname = "myrouter"
-	cmd := loadTestCommand(t, "copy.running-config.startup-config")
+	cmd := loadTestCommand(t, "write.memory")
 
 	if err := cmd.RunFunc(ctx, nil); err != nil {
-		t.Fatalf("copy.running-config.startup-config handler returned unexpected error: %v", err)
+		t.Fatalf("write.memory handler returned unexpected error: %v", err)
 	}
 
 	got, err := os.ReadFile(ctx.StartupConfigFile)
@@ -168,9 +169,12 @@ func TestCopyRunningConfigStartupConfigPrependsExecEnterWords(t *testing.T) {
 		t.Fatalf("ReadFile returned unexpected error: %v", err)
 	}
 
-	want := "enable\n" + strings.Join(runningConfigLines(ctx, state), "\n") + "\n"
+	want := strings.Join(runningConfigLines(ctx, state), "\n") + "\n"
 	if string(got) != want {
 		t.Errorf("startup-config file content = %q, want %q", string(got), want)
+	}
+	if !strings.HasPrefix(string(got), "! (example running-config)\nenable\n") {
+		t.Errorf("expected \"enable\" right after the header comment, got:\n%s", string(got))
 	}
 }
 
@@ -223,9 +227,9 @@ func TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable(t *testing
 	state.Description = "a lab router"
 	state.Interface("eth0").Description = "uplink"
 	state.Interface("eth1").Shutdown = true
-	cmd := loadTestCommand(t, "copy.running-config.startup-config")
+	cmd := loadTestCommand(t, "write.memory")
 	if err := cmd.RunFunc(saveCtx, nil); err != nil {
-		t.Fatalf("copy.running-config.startup-config handler returned unexpected error: %v", err)
+		t.Fatalf("write.memory handler returned unexpected error: %v", err)
 	}
 
 	saved, err := os.ReadFile(saveCtx.StartupConfigFile)
@@ -233,8 +237,8 @@ func TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable(t *testing
 		t.Fatalf("ReadFile returned unexpected error: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(string(saved), "\n"), "\n")
-	if lines[0] != "enable" {
-		t.Fatalf("expected the saved file's first line to be \"enable\", got %q", lines[0])
+	if lines[1] != "enable" {
+		t.Fatalf("expected the saved file's second line, right after the header comment, to be \"enable\", got %q", lines[1])
 	}
 
 	replayCtx := newTestContext()
@@ -269,5 +273,103 @@ func TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable(t *testing
 	}
 	if replayCtx.ReplayingStartupConfig {
 		t.Error("expected ReplayingStartupConfig to be false again once ReplayLines returns")
+	}
+}
+
+// TestStartupConfigReplaysBaseAndUserAliasesWithNobodyLoggedIn - This
+// test verifies the piece TestStartupConfigReplaysFromAColdBootWithNobodyHavingTypedEnable
+// above deliberately does not cover: a runtime defined command alias
+// belonging to base or user, both reached without ever running
+// "enable", replays back in correctly during a cold boot, even though
+// replayCtx.Session here is nil, nobody has logged in at all, the
+// exact case cmd/core/cmd_user.go's own "user" handler waives its
+// ordinary login requirement for, through
+// command.AppContext.ReplayingStartupConfig, see that field's own doc
+// comment in command/model.go.
+func TestStartupConfigReplaysBaseAndUserAliasesWithNobodyLoggedIn(t *testing.T) {
+	levels := showRoundTripLevels(t)
+
+	baseTree := loadTestTree(t, `commands:
+  enable:
+    run: enable
+  user:
+    run: user
+  alias:
+    minargs: 2
+    negatable: true
+    run: alias
+`)
+	levels.ByName["base"] = &command.CommandLevel{
+		Name:    "base",
+		Tree:    baseTree,
+		Aliases: map[string][]string{"b1": {"enable"}},
+	}
+	userTree := loadTestTree(t, `commands:
+  alias:
+    minargs: 2
+    negatable: true
+    run: alias
+  end:
+    run: end
+`)
+	levels.ByName["user"] = &command.CommandLevel{
+		Name:         "user",
+		Parent:       "base",
+		EnterCommand: "user",
+		Tree:         userTree,
+		Aliases: map[string][]string{
+			"u1": {"show", "version"},
+		},
+	}
+	exec := levels.ByName["exec"]
+	exec.Parent = "base"
+	exec.EnterCommand = "enable"
+
+	saveCtx := newTestContext()
+	saveCtx.Levels = levels
+	saveCtx.Position = command.NewCommandLevelStack("exec", "", levels.ByName["exec"].Tree)
+	saveCtx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config")
+	cmd := loadTestCommand(t, "write.memory")
+	if err := cmd.RunFunc(saveCtx, nil); err != nil {
+		t.Fatalf("write.memory handler returned unexpected error: %v", err)
+	}
+
+	saved, err := os.ReadFile(saveCtx.StartupConfigFile)
+	if err != nil {
+		t.Fatalf("ReadFile returned unexpected error: %v", err)
+	}
+	text := string(saved)
+	if !strings.Contains(text, "alias b1 enable") {
+		t.Errorf("expected the base alias to render unwrapped, got:\n%s", text)
+	}
+	if !strings.Contains(text, "user\nalias u1 show version\nend") {
+		t.Errorf("expected the user alias wrapped in \"user\" ... \"end\", got:\n%s", text)
+	}
+
+	// Cleared before replay, same reasoning
+	// TestShowRunningConfigOutputReplaysBackToTheSameState follows in
+	// cmd_show_test.go: this proves the rendered text alone
+	// reconstructs both aliases, not that they were simply still
+	// sitting there from the save above, levels being the same
+	// *command.TreeStructure both saveCtx and replayCtx point at.
+	levels.ByName["base"].Aliases = nil
+	levels.ByName["user"].Aliases = nil
+
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	replayCtx := newTestContext()
+	replayCtx.Levels = levels
+	replayCtx.Position = command.NewCommandLevelStack("base", "", levels.ByName["base"].Tree)
+	// Deliberately nil: this is the whole point of the test, a cold
+	// boot replay has no session at all yet.
+	replayCtx.Session = nil
+	if err := command.ReplayLines(replayCtx, lines, true); err != nil {
+		t.Fatalf("command.ReplayLines returned unexpected error with nobody logged in: %v", err)
+	}
+
+	if got := levels.ByName["base"].Aliases["b1"]; strings.Join(got, " ") != "enable" {
+		t.Errorf("replayed base alias %q, want %q", got, "enable")
+	}
+	if got := levels.ByName["user"].Aliases["u1"]; strings.Join(got, " ") != "show version" {
+		t.Errorf("replayed user alias %q, want %q", got, "show version")
 	}
 }

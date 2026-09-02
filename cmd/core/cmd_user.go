@@ -29,16 +29,35 @@ import (
 // change in cmd_password.go, acts on the current session's own entry
 // in the user database, which only makes sense once a session
 // actually knows who it is.
+//
+// requireLoggedIn is waived while ctx.ReplayingStartupConfig is true,
+// the same trust command.LoadStartupConfig already extends to every
+// other Command Level's own password gate, see that field's own doc
+// comment in model.go. A saved startup-config can only ever contain a
+// "user" block around a runtime defined command alias, see
+// cmd/product/cmd_show.go's own runningConfigLines, never a live
+// action such as "totp enable" or "password change", so this waiver
+// grants no more than replaying that one alias back in, and the
+// trust behind it is the same, this process itself already having
+// been allowed to run, and to read this file, by the operating
+// system, not a credential typed at a terminal, since a boot time
+// replay runs before any session has logged in at all.
 func init() {
 	command.Register("user", func(ctx *command.AppContext, args []string) error {
 		level := ctx.Levels.ByName["user"]
 		if err := command.RequireCurrentCommandLevel(ctx, "user", level.Parent); err != nil {
 			return err
 		}
-		if err := requireLoggedIn(ctx); err != nil {
-			return err
+		if !ctx.ReplayingStartupConfig {
+			if err := requireLoggedIn(ctx); err != nil {
+				return err
+			}
 		}
-		ctx.Logger.Debugln("DEBUG: entering user mode for user", ctx.Session.Username)
+		username := "<none, replaying startup-config>"
+		if ctx.Session != nil {
+			username = ctx.Session.Username
+		}
+		ctx.Logger.Debugln("DEBUG: entering user mode for user", username)
 		ctx.Position.Push(command.CommandLevelFrame{
 			Name:         "user",
 			PromptSuffix: level.PromptSuffix,

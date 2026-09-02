@@ -13,6 +13,8 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/command"
@@ -22,12 +24,14 @@ import (
 // the new admin Command Level, see var/tree/level_admin.yaml and
 // var/tree/tree_structure.yaml's own "admin" entry. This level
 // replaces what used to be a separate level named su-config; "show
-// running-config", "show startup-config", "copy running-config
-// startup-config", and "erase startup-config" all still live in
-// cmd/product/cmd_show.go and cmd/product/cmd_startup_config.go,
-// reused here exactly as they already were, reachable now only
-// because level_admin.yaml's own tree points its "run:" entries at
-// those same already-registered names.
+// running-config", "show startup-config", and "erase startup-config"
+// all still live in cmd/product/cmd_show.go and
+// cmd/product/cmd_startup_config.go, reused here exactly as they
+// already were, reachable now only because level_admin.yaml's own
+// tree points its "run:" entries at those same already-registered
+// names. su-config's own "copy running-config startup-config" did not
+// move here the same way, retired in favor of "write memory" alone,
+// see cmd/product/cmd_startup_config.go's own doc comment.
 //
 // "admin" and "return.admin" are the level's own entry and exit
 // commands, the same enter/exit shape cmd_enable.go and the retired
@@ -70,7 +74,11 @@ func init() {
 	command.Register("account.roles.remove", runAccountRolesRemove)
 	command.Register("erase.users", runEraseUsers)
 	command.Register("restore-factory-defaults", runRestoreFactoryDefaults)
+	// "reload" and "reboot" are full synonyms, both registered against
+	// this exact same function, sharing this exact same pending
+	// state, ctx.ReloadScheduler. See runReload's own doc comment.
 	command.Register("reload", runReload)
+	command.Register("reboot", runReload)
 }
 
 // ----------------------------------------------------------------------
@@ -183,10 +191,13 @@ func runAccountCreateWithIO(ctx *command.AppContext, fd int, stdout io.Writer, a
 		PasswordHash:       hash,
 		MustChangePassword: mustChange,
 	}
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		delete(ctx.Users, username)
-		return err
-	}
+	// This only ever changes ctx.Users, in memory, never ctx.UsersFile
+	// on disk. See this file's own top of file doc comment, and
+	// design-goals.md's own "nothing survives a restart without an
+	// explicit save" core design goal, for why: a new account created
+	// here is gone again the next time this deployment reloads or
+	// restarts, unless a session explicitly runs "write memory" or a
+	// future equivalent first.
 	ctx.Logger.Debugln("DEBUG: account", username, "created by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.create.confirm", username))
 	return nil
@@ -213,10 +224,9 @@ func runAccountDelete(ctx *command.AppContext, args []string) error {
 	}
 
 	delete(ctx.Users, username)
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		ctx.Users[username] = user
-		return err
-	}
+	// See runAccountCreateWithIO's own comment right above: this only
+	// ever changes ctx.Users, in memory. A reload or restart before
+	// "write memory" brings the deleted account right back.
 	ctx.Logger.Debugln("DEBUG: account", username, "deleted by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.delete.confirm", username))
 	return nil
@@ -279,12 +289,9 @@ func runAccountRolesAdd(ctx *command.AppContext, args []string) error {
 		return nil
 	}
 
-	previous := append([]string(nil), user.Roles...)
 	user.Roles = append(user.Roles, roleName)
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		user.Roles = previous
-		return err
-	}
+	// See runAccountCreateWithIO's own comment for why this only ever
+	// changes user.Roles, in memory, never ctx.UsersFile on disk.
 	ctx.Logger.Debugln("DEBUG: role", roleName, "added to", username, "by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.roles.add.confirm", roleName, username))
 	return nil
@@ -310,18 +317,15 @@ func runAccountRolesRemove(ctx *command.AppContext, args []string) error {
 		return fmt.Errorf("%s", ctx.Translator.T("account.delete.last_bypass_role_holder", username))
 	}
 
-	previous := append([]string(nil), user.Roles...)
-	kept := previous[:0:0]
+	kept := make([]string, 0, len(user.Roles))
 	for _, r := range user.Roles {
 		if r != roleName {
 			kept = append(kept, r)
 		}
 	}
 	user.Roles = kept
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		user.Roles = previous
-		return err
-	}
+	// See runAccountCreateWithIO's own comment for why this only ever
+	// changes user.Roles, in memory, never ctx.UsersFile on disk.
 	ctx.Logger.Debugln("DEBUG: role", roleName, "removed from", username, "by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.roles.remove.confirm", roleName, username))
 	return nil
@@ -536,23 +540,92 @@ func runRestoreFactoryDefaults(ctx *command.AppContext, args []string) error {
 	return runReload(ctx, nil)
 }
 
-// runReload - This function is the registered "reload" handler, also
-// called directly by runRestoreFactoryDefaults above once it has
-// finished restoring files on disk. RouterCLI is one OS process per
-// connection, with no persistent daemon behind it today, so there is
-// no single device process for this to reboot the way a real Cisco
-// "reload" reboots one. What this does instead: re-read users.yaml,
-// roles.yaml, and startup-config fresh from disk, through
-// auth.LoadUsers, command.LoadRoles, and command.LoadStartupConfig,
-// rebuilding this session's own in memory state from them, then end
-// this connection through command.ErrQuit, the same sentinel "exit"
-// at the base level already returns, forcing whoever ran this to
-// reconnect. Any other already connected session, once such a thing
+// runReload - This function is the registered "reload" and "reboot"
+// handler, full synonyms for the exact same command and the exact same
+// pending state, ctx.ReloadScheduler, matching the real workflow this
+// project's own design-goals.md describes: schedule one with a delay,
+// make a change, and either confirm the change worked with "no reload"
+// or "no reboot" before it fires, or let it fire and fall back to
+// whatever was last actually saved. This is also called directly by
+// runRestoreFactoryDefaults above, with args nil, once it has finished
+// restoring files on disk, and, indirectly, from main.go's own runLoop
+// through ReloadFromDiskForRestart below, once a scheduled reload
+// actually fires uncancelled.
+//
+// Three shapes, distinguished by ctx.Negated and args:
+//
+//   - "no reload" or "no reboot" cancels whatever was scheduled, see
+//     ctx.ReloadScheduler.Cancel, and refuses with an error if nothing
+//     was pending in the first place, rather than silently doing
+//     nothing.
+//   - "reload <seconds>" or "reboot <seconds>" schedules this same
+//     reload to run itself again, unattended, delay seconds from now,
+//     through ctx.ReloadScheduler.Schedule, and returns immediately,
+//     leaving the interactive session free to keep running further
+//     commands, "no reload" among them, in the meantime. RouterCLI has
+//     no persistent daemon behind a connection, see
+//     AppContext.ReloadScheduler's own doc comment, so this delay is
+//     an ordinary background timer inside this one process, not a
+//     request sent anywhere else; main.go's runLoop is what actually
+//     notices the timer firing and ends the session, since this
+//     handler itself has already returned by then.
+//   - Anything else, no args at all, runs immediately: re-read
+//     users.yaml, roles.yaml, and startup-config fresh from disk,
+//     through reloadFromDisk, rebuilding this session's own in memory
+//     state from them, then end this connection through
+//     command.ErrQuit, the same sentinel "exit" at the base level
+//     already returns, forcing whoever ran this to reconnect.
+//
+// Either way, RouterCLI is one OS process per connection, with no
+// persistent daemon behind it today, so there is no single device
+// process for this to reboot the way a real Cisco "reload" reboots
+// one, and any other already connected session, once such a thing
 // exists, keeps running on its own stale in memory state until it
 // independently reloads or reconnects too; making that better is real
 // future work, a persistent daemon architecture, not something this
 // command can promise on its own today.
 func runReload(ctx *command.AppContext, args []string) error {
+	if ctx.Negated {
+		if ctx.ReloadScheduler == nil || !ctx.ReloadScheduler.Cancel() {
+			return fmt.Errorf("%s", ctx.Translator.T("reload.not_pending"))
+		}
+		ctx.Logger.Debugln("DEBUG: scheduled reload cancelled by", ctx.Session.Username)
+		fmt.Println(ctx.Translator.T("reload.cancelled"))
+		return nil
+	}
+
+	if len(args) == 1 {
+		seconds, err := strconv.Atoi(args[0])
+		if err != nil || seconds <= 0 {
+			return fmt.Errorf("%s", ctx.Translator.T("reload.invalid_delay", args[0]))
+		}
+		if ctx.ReloadScheduler == nil {
+			return fmt.Errorf("%s", ctx.Translator.T("reload.not_supported"))
+		}
+		ctx.ReloadScheduler.Schedule(time.Duration(seconds) * time.Second)
+		ctx.Logger.Debugln("DEBUG: reload scheduled by", ctx.Session.Username, "in", seconds, "seconds")
+		fmt.Println(ctx.Translator.T("reload.scheduled", seconds))
+		return nil
+	}
+
+	if err := reloadFromDisk(ctx); err != nil {
+		return err
+	}
+	ctx.Logger.Debugln("DEBUG: reload run by", ctx.Session.Username)
+	fmt.Println(ctx.Translator.T("reload.confirm"))
+	return command.ErrQuit
+}
+
+// reloadFromDisk - This function does the actual work behind an
+// immediate reload, shared between runReload's own immediate path
+// above and ReloadFromDiskForRestart below: re-read users.yaml,
+// roles.yaml, and startup-config fresh from disk, through
+// auth.LoadUsers, command.LoadRoles, and command.LoadStartupConfig,
+// rebuilding ctx's own in memory state from them. Neither ending the
+// session nor printing anything to the terminal is this function's
+// job; each of its two callers does that its own way, an ordinary
+// command.ErrQuit return here, a background timer firing there.
+func reloadFromDisk(ctx *command.AppContext) error {
 	if ctx.UsersFile != "" {
 		users, err := auth.LoadUsers(ctx.UsersFile)
 		if err != nil {
@@ -568,8 +641,20 @@ func runReload(ctx *command.AppContext, args []string) error {
 	if err := command.LoadStartupConfig(ctx, ctx.StartupConfigFile); err != nil {
 		return fmt.Errorf("%s", ctx.Translator.T("reload.failed", err))
 	}
+	return nil
+}
 
-	ctx.Logger.Debugln("DEBUG: reload run by", ctx.Session.Username)
-	fmt.Println(ctx.Translator.T("reload.confirm"))
-	return command.ErrQuit
+// ReloadFromDiskForRestart - This function is the exported entry point
+// letting main.go's own runLoop perform a scheduled reload's actual
+// file re-reading work once its timer fires uncancelled, the same
+// exported wrapper pattern RunPasswordChange in cmd_password.go
+// already establishes, and for the same reason: main.go never resolves
+// and dispatches a command by name, so it needs a real function to
+// call directly, from a code path with no *command.Command or typed
+// args of its own to route through runReload. See
+// AppContext.ReloadScheduler's own doc comment for why runLoop, not
+// this package, is what actually notices the timer firing and ends
+// the session afterward.
+func ReloadFromDiskForRestart(ctx *command.AppContext) error {
+	return reloadFromDisk(ctx)
 }

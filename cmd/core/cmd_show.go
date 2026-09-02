@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/gotermme/routercli/command"
@@ -42,6 +43,18 @@ func init() {
 		}
 		return nil
 	})
+
+	command.Register("show.aliases", func(ctx *command.AppContext, args []string) error {
+		lines := aliasesLines(ctx)
+		if len(lines) == 0 {
+			fmt.Println(ctx.Translator.T("show.aliases.empty"))
+			return nil
+		}
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+		return nil
+	})
 }
 
 // terminalStatusLines - This function builds "show terminal"'s
@@ -56,15 +69,17 @@ func init() {
 // whatever override, if any, is currently set. Width reflects
 // paging.EffectiveTerminalWidth the same way, auto-detected from the
 // real terminal behind os.Stdin, live on every call, when no "terminal
-// width <n>" has been typed this session, rather than the fixed zero
-// this function once reported for that case. Filter mode is a
+// width <n>" has been typed this session, falling back to
+// ctx.DefaultTerminalWidth, zero unless a persisted "line" mode
+// "width <n>" setting has replayed one, only when that live detection
+// itself fails. Filter mode is a
 // RouterCLI specific addition beyond what a real Cisco or HP device
 // reports here, see var/tree/README.md, included since it directly
 // affects how "| include", "| exclude", and "| begin" behave for the
 // rest of this session.
 func terminalStatusLines(ctx *command.AppContext) []string {
 	length := paging.EffectivePageLines(int(os.Stdin.Fd()), ctx.PageLines, ctx.DefaultPageLines)
-	width := paging.EffectiveTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth)
+	width := paging.EffectiveTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth, ctx.DefaultTerminalWidth)
 
 	sessionPaging := ctx.Translator.T("show.terminal.enabled")
 	if ctx.PageLines != nil && *ctx.PageLines == 0 {
@@ -131,4 +146,45 @@ func historyLines(ctx *command.AppContext) ([]string, error) {
 		all = all[len(all)-size:]
 	}
 	return all, nil
+}
+
+// aliasesLines - This function builds "show aliases"' output, one
+// header line per Command Level that has any runtime defined alias
+// at all, see cmd/core/cmd_alias.go and
+// command.CommandLevel.Aliases, followed by one indented line per
+// alias belonging to that level, alias name then the real command it
+// expands to. ctx.Levels.Order, load order from the manifest, decides
+// which level's own block comes first, the same order
+// cmd/product/cmd_show.go's own configModeLines already walks
+// password hashes in; within one level, alias names are sorted
+// alphabetically, so this listing, unlike Aliases itself, a plain Go
+// map with no ordering guarantee of its own, is stable from one call
+// to the next. A level with no aliases defined contributes nothing
+// here, not even its own header, the same "nothing configured, nothing
+// shown" convention configModeLines already follows for an interface
+// nobody has touched.
+func aliasesLines(ctx *command.AppContext) []string {
+	var lines []string
+	if ctx.Levels == nil {
+		return lines
+	}
+
+	for _, level := range ctx.Levels.Order {
+		if len(level.Aliases) == 0 {
+			continue
+		}
+
+		names := make([]string, 0, len(level.Aliases))
+		for name := range level.Aliases {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		lines = append(lines, ctx.Translator.T("show.aliases.level_header", level.Name))
+		for _, name := range names {
+			lines = append(lines, ctx.Translator.T("show.aliases.line", name, strings.Join(level.Aliases[name], " ")))
+		}
+	}
+
+	return lines
 }

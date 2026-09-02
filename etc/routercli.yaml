@@ -5,12 +5,12 @@ TreeStructure: var/tree/tree_structure.yaml
 
 
 # --- Startup Configuration ---
-# The file the admin level's "copy running-config startup-config" and
-# "erase startup-config" read and write. RouterCLI replays it back in automatically
-# at every process start, before a session can even log in, restoring
-# hostname, interfaces, and every Command Level's own saved password
-# exactly as they were saved. See StartupConfigFile in etc/README.md for
-# the full explanation.
+# The file the admin level's "write memory" and "erase startup-config"
+# read and write. RouterCLI replays it back in automatically at every
+# process start, before a session can even log in, restoring hostname,
+# interfaces, every Command Level's own saved password, and every
+# runtime defined command alias exactly as they were saved. See
+# StartupConfigFile in etc/README.md for the full explanation.
 StartupConfigFile: var/startup-config/startup-config
 
 
@@ -136,6 +136,15 @@ TOTPMaxAttempts: 3
 # var/tree/. A missing file is not an error; it simply means
 # allowed_roles is never used anywhere. See var/tree/README.md's own
 # roles section.
+#
+# An allowed_roles list is only actually enforced while AuthRequired,
+# above, is true. With AuthRequired off, this project's own shipped,
+# zero setup default, no session anywhere has a real identity to hold
+# a role against in the first place, so every allowed_roles gate,
+# admin's own in var/tree/tree_structure.yaml included, stays wide
+# open rather than locking a project builder out of a level they just
+# declared. See command.Authorized's own doc comment for the full
+# reasoning.
 RolesFile: var/tree/roles.yaml
 #
 # DefaultsDir holds this deployment's own factory default files, at
@@ -195,7 +204,10 @@ MergeCommonCommands: true
 # entry sets "pageable: true", see var/tree/README.md. Turning this off
 # does not disable "| include", "| exclude", or "| begin" filtering
 # itself, only the pause; a Pageable command's output is still filtered,
-# just written straight through afterward with no pause at all.
+# just written straight through afterward with no pause at all. This is
+# only the value used at boot; "configure terminal", then "line", then
+# "paging" or "no paging", changes it afterward, without editing this
+# file, and, once saved, at every future boot too.
 PagingEnabled: true
 #
 # DefaultPageLines is how many lines a session shows before pausing,
@@ -203,7 +215,8 @@ PagingEnabled: true
 # non-interactive session for instance, and no "terminal length" has
 # been typed yet this session. When the terminal's height can be
 # detected, that real height is used instead, see
-# paging.EffectivePageLines.
+# paging.EffectivePageLines. The same "line" mode override described
+# above for PagingEnabled applies here too, through "line length".
 DefaultPageLines: 24
 #
 # DefaultHistorySize fixes how many past commands a session's own Up

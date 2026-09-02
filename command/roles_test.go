@@ -234,7 +234,8 @@ func TestAuthorizedEmptyAllowedRolesAlwaysTrue(t *testing.T) {
 // "any overlap" rule, not requiring every role to match.
 func TestAuthorizedGrantsOnOverlap(t *testing.T) {
 	ctx := &AppContext{
-		Session: &auth.Session{Username: "alice", Authenticated: true},
+		AuthRequired: true,
+		Session:      &auth.Session{Username: "alice", Authenticated: true},
 		Users: auth.Users{
 			"alice": {Username: "alice", Roles: []string{"operator", "auditor"}},
 		},
@@ -247,10 +248,13 @@ func TestAuthorizedGrantsOnOverlap(t *testing.T) {
 // TestAuthorizedDeniesNoOverlap - This test verifies deny by default:
 // a session holding roles, just none that overlap with AllowedRoles,
 // is refused, the same fail-closed convention PasswordHash already
-// follows for a wrong or missing credential.
+// follows for a wrong or missing credential, once this deployment has
+// AuthRequired turned on. See TestAuthorizedGrantsWhenAuthRequiredOff
+// for the different, deliberately wide open outcome while it is off.
 func TestAuthorizedDeniesNoOverlap(t *testing.T) {
 	ctx := &AppContext{
-		Session: &auth.Session{Username: "alice", Authenticated: true},
+		AuthRequired: true,
+		Session:      &auth.Session{Username: "alice", Authenticated: true},
 		Users: auth.Users{
 			"alice": {Username: "alice", Roles: []string{"operator"}},
 		},
@@ -261,11 +265,13 @@ func TestAuthorizedDeniesNoOverlap(t *testing.T) {
 }
 
 // TestAuthorizedDeniesNoRoles - This test verifies that a session
-// holding no roles at all is refused by a role gated command or level.
+// holding no roles at all is refused by a role gated command or
+// level, once this deployment has AuthRequired turned on.
 func TestAuthorizedDeniesNoRoles(t *testing.T) {
 	ctx := &AppContext{
-		Session: &auth.Session{Username: "alice", Authenticated: true},
-		Users:   auth.Users{"alice": {Username: "alice"}},
+		AuthRequired: true,
+		Session:      &auth.Session{Username: "alice", Authenticated: true},
+		Users:        auth.Users{"alice": {Username: "alice"}},
 	}
 	if Authorized(ctx, []string{"admin"}) {
 		t.Error("expected Authorized to return false for a session holding no roles")
@@ -278,7 +284,8 @@ func TestAuthorizedDeniesNoRoles(t *testing.T) {
 // list actually contains, see RoleSet.BypassRole's own doc comment.
 func TestAuthorizedBypassRoleAlwaysGranted(t *testing.T) {
 	ctx := &AppContext{
-		Session: &auth.Session{Username: "alice", Authenticated: true},
+		AuthRequired: true,
+		Session:      &auth.Session{Username: "alice", Authenticated: true},
 		Users: auth.Users{
 			"alice": {Username: "alice", Roles: []string{"admin"}},
 		},
@@ -289,13 +296,17 @@ func TestAuthorizedBypassRoleAlwaysGranted(t *testing.T) {
 	}
 }
 
-// TestAuthorizedDeniesWhenAuthRequiredOff - This test verifies the
-// documented consequence for a deployment with AuthRequired off: no
-// session ever has an identity or a Roles list, so a role gated
-// command or level can never be satisfied at all.
-func TestAuthorizedDeniesWhenAuthRequiredOff(t *testing.T) {
+// TestAuthorizedGrantsWhenAuthRequiredOff - This test verifies the
+// out of the box, zero setup behavior this project's own design
+// deliberately favors: a deployment that never turned AuthRequired on
+// has no real session identity anywhere, see CurrentUserRoles, and
+// Authorized treats that as nothing to refuse, not a wrong role, so
+// every AllowedRoles gate stays wide open until AuthRequired is
+// actually turned on. See Authorized's own doc comment for the full
+// reasoning.
+func TestAuthorizedGrantsWhenAuthRequiredOff(t *testing.T) {
 	ctx := &AppContext{}
-	if Authorized(ctx, []string{"admin"}) {
-		t.Error("expected Authorized to return false with no session at all")
+	if !Authorized(ctx, []string{"admin"}) {
+		t.Error("expected Authorized to return true with AuthRequired off, regardless of AllowedRoles")
 	}
 }

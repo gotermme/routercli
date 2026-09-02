@@ -21,12 +21,13 @@ import (
 // terminal, the same shape newTOTPTestContext in cmd_totp_test.go
 // builds for its own package's tests. ctx.Users holds one entry,
 // keyed and named username, pointing at u, and ctx.UsersFile points
-// at a throwaway file in t.TempDir(), so a test that reaches
-// auth.SaveUsers writes somewhere real and can read it back with
-// auth.LoadUsers to confirm what was actually persisted.
-// ctx.PasswordPolicy defaults to a permissive MinLength of 1 with no
-// composition rules, so a test can focus on one rule at a time by
-// overriding just the field it cares about.
+// at a throwaway path in t.TempDir() that a test can os.Stat to
+// confirm finishPasswordChange never actually writes there, since a
+// password change only ever updates ctx.Users in memory, see that
+// function's own doc comment. ctx.PasswordPolicy defaults to a
+// permissive MinLength of 1 with no composition rules, so a test can
+// focus on one rule at a time by overriding just the field it cares
+// about.
 func newPasswordTestContext(t *testing.T, username string, u *auth.User) *command.AppContext {
 	t.Helper()
 	ctx := newTestContext()
@@ -146,12 +147,16 @@ func TestVerifyReauthRejectsWrongPasswordEvenWithValidCode(t *testing.T) {
 //
 // ----------------------------------------------------------------------
 
-// TestFinishPasswordChangeSavesOnValidMatchingPassword - This test
-// verifies that a new password matching its own confirmation and
-// satisfying ctx.PasswordPolicy replaces user.PasswordHash, persists
-// it so a fresh auth.LoadUsers of ctx.UsersFile sees the new password
-// verify and the old one no longer does, and reports true.
-func TestFinishPasswordChangeSavesOnValidMatchingPassword(t *testing.T) {
+// TestFinishPasswordChangeUpdatesInMemoryOnly - This test verifies
+// that a new password matching its own confirmation and satisfying
+// ctx.PasswordPolicy replaces user.PasswordHash, in memory, so the new
+// password verifies and the old one no longer does, and reports true.
+// It never touches ctx.UsersFile on disk at all, see this project's
+// own design-goals.md: only "write memory" persists an account change
+// like this one, so a reload or restart before that runs reverts
+// right back to the old
+// password.
+func TestFinishPasswordChangeUpdatesInMemoryOnly(t *testing.T) {
 	hash, _ := auth.HashPassword("old-password")
 	user := &auth.User{Username: "alice", PasswordHash: hash}
 	ctx := newPasswordTestContext(t, "alice", user)
@@ -169,13 +174,8 @@ func TestFinishPasswordChangeSavesOnValidMatchingPassword(t *testing.T) {
 	if auth.VerifyPassword(user.PasswordHash, "old-password") {
 		t.Error("expected user.PasswordHash to no longer verify against the old password")
 	}
-
-	loaded, err := auth.LoadUsers(ctx.UsersFile)
-	if err != nil {
-		t.Fatalf("failed to reload the saved users file: %v", err)
-	}
-	if !auth.VerifyPassword(loaded["alice"].PasswordHash, "new-password") {
-		t.Error("expected the reloaded PasswordHash to verify against the new password")
+	if _, err := os.Stat(ctx.UsersFile); err == nil {
+		t.Error("expected no users file to be written until an explicit save runs")
 	}
 }
 
@@ -248,30 +248,6 @@ func TestFinishPasswordChangeRejectsSameAsCurrentAndDoesNotSave(t *testing.T) {
 	}
 	if _, err := os.Stat(ctx.UsersFile); err == nil {
 		t.Error("expected no users file to be written when the new password matched the current one")
-	}
-}
-
-// TestFinishPasswordChangeRollsBackOnSaveFailure - This test verifies
-// that a failed auth.SaveUsers call, forced by pointing ctx.UsersFile
-// at a directory that does not exist, returns an error, reports false
-// rather than true, and rolls user.PasswordHash back to its previous
-// value, the same rollback finishTOTPEnable and finishTOTPDisable
-// already perform for their own save failures.
-func TestFinishPasswordChangeRollsBackOnSaveFailure(t *testing.T) {
-	hash, _ := auth.HashPassword("old-password")
-	user := &auth.User{Username: "alice", PasswordHash: hash}
-	ctx := newPasswordTestContext(t, "alice", user)
-	ctx.UsersFile = filepath.Join(t.TempDir(), "nonexistent-subdir", "users.yaml")
-
-	changed, err := finishPasswordChange(ctx, user, "new-password", "new-password")
-	if err == nil {
-		t.Fatal("expected an error when the users file cannot be saved, got nil")
-	}
-	if changed {
-		t.Error("expected finishPasswordChange to report false when the save failed")
-	}
-	if !auth.VerifyPassword(user.PasswordHash, "old-password") {
-		t.Error("expected PasswordHash to be rolled back to the old password after a failed save")
 	}
 }
 

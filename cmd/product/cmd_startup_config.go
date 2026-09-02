@@ -12,23 +12,39 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/command"
 )
 
-// init - This function registers "copy running-config startup-config"
-// and "erase startup-config", both reachable only from inside
-// su-config, see var/tree/level_su_config.yaml. Both operate on the
-// same file, ctx.StartupConfigFile, config.SystemConfig.StartupConfigFile
-// copied onto AppContext once at startup by main.go, see
-// command.AppContext's own doc comment for why this package reaches
-// that path through ctx rather than importing package config
-// directly.
+// init - This function registers "write memory" and "erase
+// startup-config", both reachable only from inside admin, see
+// var/tree/level_admin.yaml. Both operate on ctx.StartupConfigFile,
+// config.SystemConfig.StartupConfigFile copied onto AppContext once
+// at startup by main.go, see command.AppContext's own doc comment for
+// why this package reaches that path through ctx rather than
+// importing package config directly.
 //
-// "copy running-config startup-config" writes runningConfigLines'
+// "write memory" is the one command in this project that writes
+// anything to disk at all. It writes writeRunningConfigToStartupConfig's
 // own output, the exact same text "show running-config" prints,
-// joined with newlines and a trailing one, to that file, creating its
-// parent directory if this is the first time anything has been
-// saved. This is deliberately the same single, classic-command-text
+// joined with newlines and a trailing one, to StartupConfigFile,
+// creating its parent directory if this is the first time anything
+// has been saved, then saves every in memory change to ctx.Users
+// through auth.SaveUsers, since account create, account delete,
+// account roles add, account roles remove, password change, and totp
+// enable and disable all deliberately leave ctx.UsersFile untouched
+// on disk until this runs, see cmd/core/cmd_admin.go's own top of
+// file doc comment and design-goals.md's own core "nothing survives a
+// restart without an explicit save" design goal. Real Cisco and HP
+// ship "write memory" as a synonym alongside a separate "copy
+// running-config startup-config" that only ever covers the first half
+// of this. This project ships "write memory" alone, deliberately,
+// matching this project's own design goal against building two
+// separate commands that would otherwise do almost, but not quite,
+// the same thing; see design-goals.md's own General Design Philosophy
+// section.
+//
+// The saved text is deliberately the same single, classic-command-text
 // representation Phase 24's own design goal settled on for the whole
 // project: no separate structured format, no versioning, just the
 // same lines a session could type by hand.
@@ -41,56 +57,34 @@ import (
 // Neither command reveals or redacts anything itself; whatever
 // runningConfigLines already decided to print, "<HIDDEN>" placeholders
 // included unless the current session is somewhere with
-// RevealVendorDefinedSecrets set, is exactly what gets written to
-// disk. A vendor defined secret written into startup-config this way
-// can never actually be restored from it later, since
+// RevealVendorDefinedSecrets set, is exactly what "write memory"
+// writes to disk. A vendor defined secret written into startup-config
+// this way can never actually be restored from it later, since
 // "password manager hash <HIDDEN>" is refused, not a recognized hash,
 // see auth.IsRecognizedHash, and cmd_password_manager.go's own
 // UserSettablePassword check would refuse it regardless. That is
 // deliberate, not an oversight: a vendor defined secret was never
-// meant to survive a copy out to a file an ordinary end user, even
-// one with admin access but no real reason to be looking at
+// meant to survive a save to a file an ordinary end user, even one
+// with admin access but no real reason to be looking at
 // startup-config's raw text, might read.
 //
-// RouterCLI replays this file back in automatically, once, at process
-// startup, before establishSession or the interactive loop begins,
-// see command.LoadStartupConfig in command/replay.go and
+// RouterCLI replays startup-config back in automatically, once, at
+// process startup, before establishSession or the interactive loop
+// begins, see command.LoadStartupConfig in command/replay.go and
 // cmd/core/cmd_admin.go's own doc comments for the full reasoning
 // behind why that is safe with no password prompting at all.
-//
-// What actually gets written here is not quite byte for byte
-// runningConfigLines' own output. execEnterWords, see cmd_show.go, is
-// prepended first, when the shipped tree resolves it, "enable" in
-// this project's own tree. "show running-config" itself is only ever
-// reachable from inside exec in the first place, so a live session
-// viewing it, or pasting its own output back in by hand, is already
-// assumed to have elevated to exec first, the same real Cisco and HP
-// convention. A fresh process replaying this file at boot has nobody
-// to have typed "enable" first, starting completely cold at base
-// instead, so this one extra line is what makes the saved file
-// self-contained and replayable starting from base, not only from
-// inside an already-elevated session.
 func init() {
-	command.Register("copy.running-config.startup-config", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
-		var lines []string
-		if enter, ok := execEnterWords(ctx); ok {
-			lines = append(lines, strings.Join(enter, " "))
+	command.Register("write.memory", func(ctx *command.AppContext, args []string) error {
+		if err := writeRunningConfigToStartupConfig(ctx); err != nil {
+			return err
 		}
-		lines = append(lines, runningConfigLines(ctx, state)...)
-		text := strings.Join(lines, "\n") + "\n"
-
-		if dir := filepath.Dir(ctx.StartupConfigFile); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0750); err != nil {
-				return fmt.Errorf("%s", ctx.Translator.T("copy_running_config_startup_config.failed", err))
+		if ctx.UsersFile != "" {
+			if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
+				return fmt.Errorf("%s", ctx.Translator.T("write_memory.failed", err))
 			}
+			ctx.Logger.Debugln("DEBUG: users.yaml saved to", ctx.UsersFile)
 		}
-		if err := os.WriteFile(ctx.StartupConfigFile, []byte(text), 0640); err != nil {
-			return fmt.Errorf("%s", ctx.Translator.T("copy_running_config_startup_config.failed", err))
-		}
-
-		ctx.Logger.Debugln("DEBUG: running-config copied to startup-config at", ctx.StartupConfigFile)
-		fmt.Println(ctx.Translator.T("copy_running_config_startup_config.confirm"))
+		fmt.Println(ctx.Translator.T("write_memory.confirm"))
 		return nil
 	})
 
@@ -108,4 +102,31 @@ func init() {
 		fmt.Println(ctx.Translator.T("erase_startup_config.confirm"))
 		return nil
 	})
+}
+
+// writeRunningConfigToStartupConfig - This function writes
+// runningConfigLines' own output, byte for byte the same text "show
+// running-config" prints, to ctx.StartupConfigFile, creating its
+// parent directory if this is the first time anything has been saved.
+// See this file's own init doc comment for the full reasoning behind
+// what gets written and why. runningConfigLines already prepends
+// "enable" itself, through execEnterWords, whenever it has any
+// exec-rooted content to follow, so what this function writes is
+// already self-contained and replayable starting from base, with
+// nothing further needed here.
+func writeRunningConfigToStartupConfig(ctx *command.AppContext) error {
+	state := ctx.State.(*ProductState)
+	text := strings.Join(runningConfigLines(ctx, state), "\n") + "\n"
+
+	if dir := filepath.Dir(ctx.StartupConfigFile); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("%s", ctx.Translator.T("startup_config.save_failed", err))
+		}
+	}
+	if err := os.WriteFile(ctx.StartupConfigFile, []byte(text), 0640); err != nil {
+		return fmt.Errorf("%s", ctx.Translator.T("startup_config.save_failed", err))
+	}
+
+	ctx.Logger.Debugln("DEBUG: running-config saved to startup-config at", ctx.StartupConfigFile)
+	return nil
 }

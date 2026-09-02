@@ -122,17 +122,29 @@ func ReplayLines(ctx *AppContext, lines []string, trusted bool) error {
 // the next real connection would otherwise be the first to discover
 // it.
 //
-// ctx.Position and ctx.Session.CommandLevel are both reset back to
-// the base level before this returns, success or failure, through a
-// deferred reset, since replaying "enable" and "configure terminal"
-// style lines necessarily walks ctx.Position deep into whatever
-// Command Levels the saved configuration touched, and that must never
-// be where a session about to log in, or a session about to end right
-// after "reload", is actually left sitting. Every mutation this
-// function's own replay makes to ctx.State itself, and to any Command
-// Level's own PasswordHash through a replayed "password manager hash"
-// line, is deliberately left in place; only the navigation state this
-// function itself used to get there is undone.
+// ctx.Position and ctx.Session.CommandLevel are both reset to the
+// base level before replay begins, and reset back to base again
+// before this function returns, success or failure, through a
+// deferred reset. The reset before replay matters just as much as the
+// one after: startup-config always starts with "enable" and walks
+// down from there, exactly as a session logging in from base would,
+// so replay must actually begin at base too, regardless of wherever
+// ctx.Position happened to be sitting when this function was called.
+// At process startup that is already base, nothing has logged in
+// yet, but "reload" in cmd/core/cmd_admin.go calls this function
+// again mid-session, from whatever Command Level the session
+// happened to be standing in, admin for instance, and replaying
+// "enable" against admin's own tree would simply fail to resolve.
+// The reset after replay matters for the same reason in reverse;
+// replaying "enable" and "configure terminal" style lines necessarily
+// walks ctx.Position deep into whatever Command Levels the saved
+// configuration touched, and that must never be where a session about
+// to log in, or a session about to end right after "reload", is
+// actually left sitting. Every mutation this function's own replay
+// makes to ctx.State itself, and to any Command Level's own
+// PasswordHash through a replayed "password manager hash" line, is
+// deliberately left in place; only the navigation state this function
+// itself used to get there is undone.
 //
 // The whole replay runs inside paging.CaptureOutput, so the ordinary
 // confirmation text every replayed line's own handler prints never
@@ -151,10 +163,12 @@ func LoadStartupConfig(ctx *AppContext, path string) error {
 	}
 
 	base := ctx.Levels.Base()
-	defer func() {
+	resetToBase := func() {
 		ctx.Position = NewCommandLevelStack(base.Name, base.PromptSuffix, base.Tree)
 		ctx.Session.CommandLevel = base.Name
-	}()
+	}
+	resetToBase()
+	defer resetToBase()
 
 	lines := strings.Split(string(data), "\n")
 	var replayErr error

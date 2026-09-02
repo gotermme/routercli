@@ -278,12 +278,11 @@ func clearScreen(w io.Writer) {
 // failure. The caller, runTOTPEnable, decides whether that leaves any
 // attempts remaining.
 //
-// On success, user.TOTPSecret is set and the change is persisted with
-// auth.SaveUsers immediately, using ctx.UsersFile, the same path
-// ctx.Users was originally loaded from. If that save fails, the
-// in-memory change is rolled back, so this session's own state does
-// not claim TOTP is enabled when the users file on disk still says
-// otherwise, and this reports false alongside the error.
+// On success, user.TOTPSecret is set, in memory only. Nothing here
+// ever touches ctx.UsersFile on disk; a session must explicitly run
+// "write memory" separately, see design-goals.md's own core design
+// goal on this. A process that reloads or restarts before that
+// happens goes right back to TOTP being disabled for this account.
 //
 // The returned bool tells the caller whether enrollment actually
 // completed, the same reason auth.VerifyLogin returns a bool
@@ -297,11 +296,11 @@ func finishTOTPEnable(ctx *command.AppContext, user *auth.User, secret, code str
 	}
 
 	user.TOTPSecret = secret
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		user.TOTPSecret = ""
-		return false, err
-	}
-
+	// This only ever changes user.TOTPSecret, in memory, never
+	// ctx.UsersFile on disk. See design-goals.md's own "nothing
+	// survives a restart without an explicit save" core design goal: a
+	// reload or restart before "write memory" leaves TOTP disabled
+	// again for this account.
 	ctx.Logger.Debugln("DEBUG: TOTP enabled for user", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("totp.enable_confirm"))
 	return true, nil
@@ -316,9 +315,8 @@ func finishTOTPEnable(ctx *command.AppContext, user *auth.User, secret, code str
 // second factor is exactly the kind of action someone else at an
 // unlocked session should not be able to do unchallenged.
 //
-// On success, user.TOTPSecret is cleared and the change is persisted
-// with auth.SaveUsers, rolled back the same way finishTOTPEnable rolls
-// back if that save fails.
+// On success, user.TOTPSecret is cleared, in memory only, the same
+// reasoning finishTOTPEnable's own doc comment gives, in reverse.
 //
 // The returned bool tells the caller, the registered "totp.disable"
 // handler, whether the account is now actually disabled, so it knows
@@ -330,13 +328,11 @@ func finishTOTPDisable(ctx *command.AppContext, user *auth.User, password, code 
 		return false, nil
 	}
 
-	previous := user.TOTPSecret
 	user.TOTPSecret = ""
-	if err := auth.SaveUsers(ctx.UsersFile, ctx.Users); err != nil {
-		user.TOTPSecret = previous
-		return false, err
-	}
-
+	// This only ever changes user.TOTPSecret, in memory, never
+	// ctx.UsersFile on disk. See finishTOTPEnable's own comment right
+	// above for the same reasoning, in reverse: a reload or restart
+	// before "write memory" leaves TOTP enabled again for this account.
 	ctx.Logger.Debugln("DEBUG: TOTP disabled for user", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("totp.disable_confirm"))
 	return true, nil

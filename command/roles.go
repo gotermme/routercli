@@ -154,9 +154,10 @@ func LoadRoles(path string) (*RoleSet, error) {
 // logged in session's own account holds, from ctx.Users, or nil when
 // there is no logged in session, no user database at all, meaning
 // AuthRequired is off, or no matching entry for the session's own
-// username. A nil or empty result is not itself an error; it simply
-// means Authorized has nothing to grant a role gated command or level
-// through, other than the deployment's own bypass role.
+// username. A nil or empty result is not itself an error; whether
+// that leaves a role gated command or level reachable at all is
+// Authorized's own decision, see its doc comment, not this
+// function's.
 func CurrentUserRoles(ctx *AppContext) []string {
 	if ctx.Session == nil || !ctx.Session.Authenticated {
 		return nil
@@ -181,19 +182,32 @@ func CurrentUserRoles(ctx *AppContext) []string {
 // existing tree file, none of which sets AllowedRoles, working
 // completely unchanged.
 //
+// AllowedRoles is also never enforced while ctx.AuthRequired is
+// false, regardless of what allowedRoles actually contains, and this
+// returns true immediately in that case too. This project exists as
+// a library first, meant to be picked up with nothing configured yet
+// and produce a genuinely working, wide open command line, not one
+// that quietly locks a project builder out of a level they just
+// declared in their own tree file. AuthRequired off means no session
+// anywhere has a real identity at all, see CurrentUserRoles, so there
+// is no meaningful "wrong role" to refuse in the first place, only
+// "nobody has ever logged in here yet," the correct state for
+// everything to stay reachable. A role gate only starts to mean
+// anything the moment a deployment, its own vendor, or its very
+// first administrator, turns AuthRequired on, exactly the point real
+// identity starts to exist for any session to hold a role against.
+//
 // Otherwise, a session is authorized when the currently logged in
 // user, see CurrentUserRoles, holds ctx.Roles's own bypass role, if
 // one is declared, or holds any role at all that also appears in
 // allowedRoles. A user with no roles, or none that overlap, is
 // refused, deny by default, the same fail-closed convention
 // PasswordHash already follows for a wrong or missing credential.
-// This also means a deployment with AuthRequired off, where no
-// session ever has an identity or a Roles list to begin with, can
-// never satisfy a role gated command or level at all; a project that
-// wants any AllowedRoles gate to mean anything must also turn
-// AuthRequired on.
 func Authorized(ctx *AppContext, allowedRoles []string) bool {
 	if len(allowedRoles) == 0 {
+		return true
+	}
+	if !ctx.AuthRequired {
 		return true
 	}
 	bypass := ""
