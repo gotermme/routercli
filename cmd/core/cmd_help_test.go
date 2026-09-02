@@ -6,10 +6,12 @@
 package core
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/paging"
 )
 
 // TestHelpHandlerListsCurrentPositionTree - This test verifies that
@@ -37,17 +39,25 @@ func TestHelpHandlerListsCurrentPositionTree(t *testing.T) {
 	}
 }
 
-// TestHelpHandlerWithCommandNameShowsHelpForPath - This test verifies
+// TestHelpHandlerWithCommandNameShowsDetailedHelp - This test verifies
 // that "help" typed with a command name after it prints exactly what
-// command.HelpForPath itself returns for that same path, the same
-// text "<command> ?" already shows, rather than falling back to the
-// full current-level listing the way it did before this behavior was
-// added.
-func TestHelpHandlerWithCommandNameShowsHelpForPath(t *testing.T) {
+// command.DetailedHelp itself returns for that same path, a man page
+// style description rather than the "what can I type next" answer
+// command.HelpForPath, and "<command> ?", still give. The width passed
+// to command.DetailedHelp here is computed the same way the real
+// handler computes it, through paging.EffectiveTerminalWidth, rather
+// than a hardcoded literal, so this test's "want" stays byte for byte
+// in sync with the real handler regardless of whether the test
+// process's own stdin happens to be a real terminal.
+func TestHelpHandlerWithCommandNameShowsDetailedHelp(t *testing.T) {
 	ctx := newTestContext()
 	minArgs := 2
 	tree := map[string]*command.Command{
-		"greet": {ArgHelp: "<name> <greeting>  Say something to someone.", MinArgs: &minArgs},
+		"greet": {
+			Desc:    "Say something to someone",
+			ArgHelp: "<name> <greeting>  Say something to someone.",
+			MinArgs: &minArgs,
+		},
 	}
 	ctx.Position = command.NewCommandLevelStack("exec", "", tree)
 	cmd := loadTestCommand(t, "help")
@@ -57,9 +67,37 @@ func TestHelpHandlerWithCommandNameShowsHelpForPath(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("help handler returned unexpected error: %v", runErr)
 	}
-	want := command.HelpForPath(tree, []string{"greet"}, ctx.Translator, ctx.ListOptions)
+	width := paging.EffectiveTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth, ctx.DefaultTerminalWidth)
+	want := command.DetailedHelp(tree, []string{"greet"}, ctx.Translator, ctx.ListOptions, ctx.ProductName, width)
 	if out != want {
-		t.Errorf("help greet output = %q, want %q (command.HelpForPath's own output)", out, want)
+		t.Errorf("help greet output = %q, want %q (command.DetailedHelp's own output)", out, want)
+	}
+	if !strings.Contains(out, "Say something to someone") {
+		t.Errorf("help greet output = %q, expected it to contain the command's own description", out)
+	}
+}
+
+// TestHelpHandlerWithAmbiguousCommandNamePrintsCandidates - This test
+// verifies that "help" typed with a partial name matching more than
+// one command prints the matching candidate names, through
+// command.DetailedHelp, rather than being refused as unknown the way a
+// name matching nothing at all is.
+func TestHelpHandlerWithAmbiguousCommandNamePrintsCandidates(t *testing.T) {
+	ctx := newTestContext()
+	tree := map[string]*command.Command{
+		"show": {Desc: "Show something"},
+		"set":  {Desc: "Set something"},
+	}
+	ctx.Position = command.NewCommandLevelStack("exec", "", tree)
+	cmd := loadTestCommand(t, "help")
+
+	var runErr error
+	out := captureStdout(t, func() { runErr = cmd.RunFunc(ctx, []string{"s"}) })
+	if runErr != nil {
+		t.Fatalf("help handler returned unexpected error: %v", runErr)
+	}
+	if !strings.Contains(out, "show") || !strings.Contains(out, "set") {
+		t.Errorf("help s output = %q, expected it to list both candidate names", out)
 	}
 }
 

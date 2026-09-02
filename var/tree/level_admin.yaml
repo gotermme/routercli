@@ -63,6 +63,7 @@ commands:
 
   reload:
     desc_key: reload.desc
+    help_key: reload.help
     arghelp_key: reload.arghelp
     maxargs: 1
     # With no argument, re-reads every persistent file from disk,
@@ -78,6 +79,7 @@ commands:
 
   reboot:
     desc_key: reboot.desc
+    help_key: reload.help
     arghelp_key: reload.arghelp
     maxargs: 1
     # A full synonym for "reload" above, sharing its exact same

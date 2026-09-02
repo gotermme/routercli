@@ -58,6 +58,7 @@ func TestLoadSystemConfigValid(t *testing.T) {
 	}
 
 	want := SystemConfig{
+		ProductName:        "RouterCLI",
 		PreventEscape:      true,
 		LogLevel:           3,
 		HistoryFile:        "/tmp/hist",
@@ -632,6 +633,10 @@ func TestDefaultSystemConfigValues(t *testing.T) {
 
 	if cfg.LoginMaxAttempts != 3 {
 		t.Errorf("LoginMaxAttempts default = %d, want 3", cfg.LoginMaxAttempts)
+	}
+
+	if cfg.ProductName != "RouterCLI" {
+		t.Errorf("ProductName default = %q, want %q", cfg.ProductName, "RouterCLI")
 	}
 
 	if cfg.TOTPIssuer != "RouterCLI" {
@@ -1386,6 +1391,7 @@ func TestDurationYAMLRoundTrip(t *testing.T) {
 // literal "#" that could otherwise be misread as a YAML comment.
 func TestSystemConfigYAMLRoundTrip(t *testing.T) {
 	in := SystemConfig{
+		ProductName:         "AcmeRouter",
 		PreventEscape:       true,
 		LogLevel:            3,
 		HistoryFile:         "/tmp/hist",

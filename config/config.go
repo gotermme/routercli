@@ -113,6 +113,7 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 // real file overrides these values.
 func DefaultSystemConfig() SystemConfig {
 	return SystemConfig{
+		ProductName:                 "RouterCLI",
 		PreventEscape:               false,
 		LogLevel:                    0,
 		HistoryFile:                 "var/log/history.log",

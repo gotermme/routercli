@@ -9,6 +9,12 @@ This is the main configuration file for RouterCLI, loaded from the path given vi
 
 All fields are optional; every field not set falls back to the default shown below.
 
+### Product Identity
+
+#### `ProductName`
+
+This property defines this deployment's own display name. The default is `RouterCLI`. It is used to build the centered title of `help <command>`'s own man page style header line, `<ProductName> Help Information`, so a project built on top of RouterCLI can show its own name there rather than the framework's. This is purely cosmetic, and separate from `TOTPIssuer` below, which has its own, narrower purpose and its own default.
+
 ### Security Settings
 
 #### `PreventEscape` 

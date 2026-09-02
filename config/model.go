@@ -23,6 +23,15 @@ type Duration time.Duration
 // See LoadSystemConfig for how a YAML file is decoded into this type.
 
 type SystemConfig struct {
+	// ProductName is the deployment's own display name, shown in the
+	// centered title of command.DetailedHelp's own man page style
+	// header line, "<ProductName> Help Information", by way of
+	// command.AppContext.ProductName, the same wiring pattern
+	// TOTPIssuer below already uses for its own, narrower purpose. The
+	// default is "RouterCLI" itself, see DefaultSystemConfig, so a
+	// deployment that never sets this still gets a real, sensible
+	// title rather than a blank one.
+	ProductName                    string   `yaml:"ProductName"`
 	PreventEscape                  bool     `yaml:"PreventEscape"`
 	LogLevel                       int      `yaml:"LogLevel"`
 	LogFile                        string   `yaml:"LogFile"`

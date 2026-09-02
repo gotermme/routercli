@@ -4,6 +4,7 @@
 commands:
   hostname:
     desc_key: hostname.desc
+    arghelp_key: hostname.arghelp
     minargs: 1
     maxargs: 1
     maxarglength: 64
@@ -13,6 +14,7 @@ commands:
 
   interface:
     desc_key: interface.desc
+    arghelp_key: interface.arghelp
     minargs: 1
     maxargs: 1
     maxarglength: 32

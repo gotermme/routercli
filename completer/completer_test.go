@@ -584,6 +584,209 @@ func TestHelpTokensAndRestoredBufferMidLineInsertion(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+//
+// "help <command>" completes and shows "?" for its own argument
+// against the current tree, rather than being left alone as a leaf
+// command's free-form argument with nothing to complete
+//
+// ----------------------------------------------------------------------
+
+// helpTestTree - This function returns testTree()'s own commands plus
+// a "help" entry, reachable by its own literal name the same way it
+// is in the real shipped tree, var/tree/level_common.yaml, and a top
+// level "set" command sharing the "s" prefix with "show", for a
+// genuine two way ambiguity nested behind "help" too. This is what
+// unwrapHelpTokens, and the OnChange and handleHelp tests built on it
+// below, resolve against.
+func helpTestTree() map[string]*command.Command {
+	tree := testTree()
+	tree["help"] = &command.Command{Desc: "Display available commands", ArgHelp: "[<word...>]  A command name."}
+	tree["set"] = &command.Command{Desc: "Set something"}
+	return tree
+}
+
+// TestUnwrapHelpTokensLeavesOrdinaryTokensAlone - This test verifies
+// that a token path not starting with "help" at all passes through
+// unchanged, with an empty prefix, confirming this unwrap is entirely
+// inert for every ordinary command.
+func TestUnwrapHelpTokensLeavesOrdinaryTokensAlone(t *testing.T) {
+	tree := helpTestTree()
+	tokens, prefix := unwrapHelpTokens(tree, []string{"show"})
+
+	if len(tokens) != 1 || tokens[0] != "show" {
+		t.Errorf("tokens = %v, want [\"show\"] unchanged", tokens)
+	}
+	if prefix != "" {
+		t.Errorf("prefix = %q, want empty", prefix)
+	}
+}
+
+// TestUnwrapHelpTokensStopsWithNoArgsYet - This test verifies that
+// "help" typed alone, nothing after it yet, is left as is: there is
+// nothing to unwrap since res.Args is empty, matching plain "help"
+// with no command name at all.
+func TestUnwrapHelpTokensStopsWithNoArgsYet(t *testing.T) {
+	tree := helpTestTree()
+	tokens, prefix := unwrapHelpTokens(tree, []string{"help"})
+
+	if len(tokens) != 1 || tokens[0] != "help" {
+		t.Errorf("tokens = %v, want [\"help\"] unchanged", tokens)
+	}
+	if prefix != "" {
+		t.Errorf("prefix = %q, want empty", prefix)
+	}
+}
+
+// TestUnwrapHelpTokensUnwrapsOneLevel - This test verifies the core
+// case: "help con" resolves its leftover argument, "con", against the
+// same tree "help" itself came from, unwrapping to just ["con"] with
+// prefix "help ", rather than leaving ["con"] buried as "help"'s own
+// unresolved free-form argument.
+func TestUnwrapHelpTokensUnwrapsOneLevel(t *testing.T) {
+	tree := helpTestTree()
+	tokens, prefix := unwrapHelpTokens(tree, []string{"help", "con"})
+
+	if len(tokens) != 1 || tokens[0] != "con" {
+		t.Errorf("tokens = %v, want [\"con\"]", tokens)
+	}
+	if prefix != "help " {
+		t.Errorf("prefix = %q, want %q", prefix, "help ")
+	}
+}
+
+// TestUnwrapHelpTokensStopsOnAmbiguousNestedResolution - This test
+// verifies that once the nested tokens themselves resolve ambiguously,
+// "s" here matching both "show" and "set", the unwrap stops and hands
+// that ambiguous token back unresolved, along with the "help " prefix
+// already earned, rather than trying to resolve past an ambiguity.
+func TestUnwrapHelpTokensStopsOnAmbiguousNestedResolution(t *testing.T) {
+	tree := helpTestTree()
+	tokens, prefix := unwrapHelpTokens(tree, []string{"help", "s"})
+
+	if len(tokens) != 1 || tokens[0] != "s" {
+		t.Errorf("tokens = %v, want [\"s\"]", tokens)
+	}
+	if prefix != "help " {
+		t.Errorf("prefix = %q, want %q", prefix, "help ")
+	}
+}
+
+// TestUnwrapHelpTokensHandlesRepeatedHelp - This test verifies that
+// "help help con", an odd but not meaningless line, unwraps twice,
+// accumulating "help help " as the prefix, confirming the loop keeps
+// going for as long as each successive resolution keeps landing back
+// on the literal "help" command, not just once.
+func TestUnwrapHelpTokensHandlesRepeatedHelp(t *testing.T) {
+	tree := helpTestTree()
+	tokens, prefix := unwrapHelpTokens(tree, []string{"help", "help", "con"})
+
+	if len(tokens) != 1 || tokens[0] != "con" {
+		t.Errorf("tokens = %v, want [\"con\"]", tokens)
+	}
+	if prefix != "help help " {
+		t.Errorf("prefix = %q, want %q", prefix, "help help ")
+	}
+}
+
+// TestIsHelpCommandMatchesOnlyTheRealHelpEntry - This test verifies
+// isHelpCommand reports true only for the exact *Command stored under
+// "help" in tree, false for any other command, and false, rather than
+// panicking, against a tree with no "help" entry at all, the shape a
+// Command Level built with skip_common: true would have.
+func TestIsHelpCommandMatchesOnlyTheRealHelpEntry(t *testing.T) {
+	tree := helpTestTree()
+
+	if !isHelpCommand(tree, tree["help"]) {
+		t.Error("expected isHelpCommand to be true for tree's own \"help\" entry")
+	}
+	if isHelpCommand(tree, tree["show"]) {
+		t.Error("expected isHelpCommand to be false for a different command")
+	}
+
+	noHelp := testTree()
+	delete(noHelp, "help")
+	if isHelpCommand(noHelp, noHelp["show"]) {
+		t.Error("expected isHelpCommand to be false against a tree with no \"help\" entry")
+	}
+}
+
+// TestOnChangeExpandsCommandNameAfterHelp - This test verifies the
+// regression this round fixes end to end: typing "help con" and
+// pressing Tab now expands to "help configure ", the same way typing
+// "con" alone would expand to "configure ", rather than leaving the
+// buffer untouched because a leaf command's free-form argument has
+// nothing to complete. This never touches l.instance, "con" resolves
+// uniquely, so the Ambiguous branch, the only one that prints, is
+// never reached.
+func TestOnChangeExpandsCommandNameAfterHelp(t *testing.T) {
+	l := &TreeListener{position: command.NewCommandLevelStack("exec", "", helpTestTree()), logger: testLogger()}
+
+	line := []rune("help con")
+	newLine, newPos, ok := l.OnChange(line, len(line), readline.CharTab)
+	if !ok {
+		t.Fatal("expected OnChange to rewrite the buffer for \"help con\" + Tab")
+	}
+	got := string(newLine)
+	want := "help configure "
+	if got != want {
+		t.Errorf("OnChange(%q) = %q, want %q", "help con", got, want)
+	}
+	if newPos != len([]rune(want)) {
+		t.Errorf("OnChange(%q) cursor = %d, want %d", "help con", newPos, len([]rune(want)))
+	}
+}
+
+// TestOnChangeHelpAmbiguousPartialWordTracksTapCountWithoutPrinting -
+// This test verifies the nested counterpart to
+// TestOnChangeAmbiguousPartialWordTracksTapCountWithoutPrinting: "help
+// s", ambiguous between "show" and "set" once unwrapped, tracks
+// tapCount and lastAmbiguousInput exactly the same way a plain "s"
+// would, keyed by the full typed line, "help s", and touches
+// l.instance not at all on this first Tap.
+func TestOnChangeHelpAmbiguousPartialWordTracksTapCountWithoutPrinting(t *testing.T) {
+	l := &TreeListener{position: command.NewCommandLevelStack("exec", "", helpTestTree()), logger: testLogger()}
+
+	line := []rune("help s")
+	newLine, newPos, ok := l.OnChange(line, len(line), readline.CharTab)
+	if ok {
+		t.Error("expected OnChange to report ok=false, nothing to expand for a still-ambiguous nested word")
+	}
+	if newLine != nil || newPos != 0 {
+		t.Errorf("OnChange(\"help s\") = (%v, %d), want (nil, 0)", newLine, newPos)
+	}
+	if l.tapCount != 1 {
+		t.Errorf("tapCount = %d, want 1 after the first Tab on an ambiguous nested word", l.tapCount)
+	}
+	if l.lastAmbiguousInput != "help s" {
+		t.Errorf("lastAmbiguousInput = %q, want %q", l.lastAmbiguousInput, "help s")
+	}
+}
+
+// TestOnChangeQuestionMarkAfterHelpWithUnknownNestedNameDoesNotPanicWithoutInstance -
+// This test verifies handleHelp's own use of unwrapHelpTokens: "help
+// bogus?" unwraps to look up help for "bogus" against the tree
+// directly, and since nothing named "bogus" exists, HelpForPath
+// returns "", so handleHelp's own Fprint call is skipped, the same
+// reasoning TestOnChangeQuestionMarkDoesNotPanicWithoutInstance below
+// already relies on, keeping this safe to run without a real
+// *readline.Instance.
+func TestOnChangeQuestionMarkAfterHelpWithUnknownNestedNameDoesNotPanicWithoutInstance(t *testing.T) {
+	l := &TreeListener{position: command.NewCommandLevelStack("exec", "", helpTestTree()), logger: testLogger()}
+
+	line := []rune("help bogus?")
+	newLine, newPos, ok := l.OnChange(line, len(line), '?')
+	if !ok {
+		t.Fatal("expected OnChange to report ok=true for '?' (it always restores the buffer)")
+	}
+	if got, want := string(newLine), "help bogus"; got != want {
+		t.Errorf("OnChange('?') buffer = %q, want %q", got, want)
+	}
+	if newPos != len([]rune("help bogus")) {
+		t.Errorf("OnChange('?') cursor = %d, want %d", newPos, len([]rune("help bogus")))
+	}
+}
+
 // TestOnChangeQuestionMarkDoesNotPanicWithoutInstance - This test verifies the same reasoning as
 // TestOnChangeAddsTrailingSpaceAfterUniqueCompletion, see that test's doc
 // comment: this only exercises a path that never needs to print. An

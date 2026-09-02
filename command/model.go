@@ -406,12 +406,30 @@ type ResolveResult struct {
 // a real default even when nothing in etc/routercli.yaml overrides
 // it, see config.DefaultSystemConfig.
 //
+// ProductName is the deployment's own configured display name, copied
+// here once at startup from config.SystemConfig.ProductName the same
+// way StartupConfigFile below is, unconditionally, since a
+// deployment's own name is meaningful regardless of whether
+// AuthRequired is on. This is passed straight through to
+// command.DetailedHelp by cmd/core/cmd_help.go's "help" handler,
+// which uses it to build that function's own man page style header
+// line, "<ProductName> Help Information", centered between two
+// mirrored copies of the command's own name. An empty string, a hand
+// built AppContext in a test that never sets this for instance, is
+// treated by DetailedHelp itself as "RouterCLI", the same default
+// config.DefaultSystemConfig already ships, so this field is never
+// genuinely blank in real use.
+//
 // TOTPIssuer is the name shown in a user's authenticator app next to
 // their account name, passed straight through to
 // auth.TOTPProvisioningURI. This mirrors config.SystemConfig's own
 // TOTPIssuer setting, so a session enrolling in TOTP mid-session,
 // totp enable in package core (cmd/core), presents the same issuer
-// name a fresh login prompt would.
+// name a fresh login prompt would. This is a deliberately separate
+// field from ProductName above, rather than the two sharing one
+// value, since changing a deployment's own display name must never
+// silently relabel an already enrolled user's authenticator app
+// entry.
 //
 // TOTPMaxAttempts is how many times in a row a handler such as totp
 // enable or totp disable lets a session retype a rejected TOTP code
@@ -513,6 +531,7 @@ type AppContext struct {
 	Users             auth.Users
 	UsersFile         string
 	StartupConfigFile string
+	ProductName       string
 	TOTPIssuer        string
 	TOTPMaxAttempts   int
 

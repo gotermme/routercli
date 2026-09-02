@@ -58,6 +58,16 @@ func (l *TreeListener) SetPrompt(prompt string) {
 // candidate list only prints on the second consecutive press, matching
 // Cisco and HP ProCurve behavior. When ok is true, readline replaces its
 // buffer with newLine and moves the cursor to newPos.
+//
+// tokens is unwrapped through unwrapHelpTokens before any of this runs,
+// so typing "help" followed by a partial command name completes that
+// name against this same tree, "help con" expanding to "help configure "
+// for instance, rather than being left alone as "help"'s own free-form
+// argument with nothing to complete. linePrefix carries whatever already
+// resolved along the way, "help " for one level of unwrapping, back into
+// both the ambiguous candidate rewrite and the resolvedLine assembly
+// below, so the line on screen still reads as "help ..." rather than
+// silently losing the word that got here.
 func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune, newPos int, ok bool) {
 	if key == '?' {
 		return l.handleHelp(line, pos)
@@ -84,7 +94,9 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 		tokens = append(tokens, "")
 	}
 
-	res := command.Resolve(l.position.Current().Tree, tokens)
+	tree := l.position.Current().Tree
+	tokens, linePrefix := unwrapHelpTokens(tree, tokens)
+	res := command.Resolve(tree, tokens)
 
 	// "no " is preserved as a literal prefix on the rewritten line in
 	// both branches below. Resolve() strips it internally to find the
@@ -98,7 +110,7 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 	}
 
 	if len(res.Ambiguous) > 0 {
-		newBuf := ambiguousRewriteBuffer(tokens, res, noPrefix)
+		newBuf := linePrefix + ambiguousRewriteBuffer(tokens, res, noPrefix)
 
 		if typed == l.lastAmbiguousInput {
 			l.tapCount++
@@ -146,7 +158,7 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 	l.tapCount = 0
 	l.lastAmbiguousInput = ""
 
-	resolvedLine := noPrefix + strings.Join(res.FullName, " ")
+	resolvedLine := linePrefix + noPrefix + strings.Join(res.FullName, " ")
 	if len(res.Args) > 0 {
 		if resolvedLine != "" {
 			resolvedLine += " "
@@ -229,6 +241,12 @@ func (l *TreeListener) OnChange(line []rune, pos int, key rune) (newLine []rune,
 // Cisco's distinct word help, bare matching names with no descriptions.
 // That is a reasonable stand-in for now, not a deliberate design choice,
 // and is worth revisiting if that distinction matters in practice.
+//
+// tokens is unwrapped through unwrapHelpTokens before being handed to
+// HelpForPath, the same as OnChange's own Tab handling, so "help ?" and
+// "help con?" show contextual help for whatever comes after "help"
+// against this same tree, rather than "help"'s own fixed ArgHelp hint
+// every time regardless of what, if anything, was typed after it.
 func (l *TreeListener) handleHelp(line []rune, pos int) (newLine []rune, newPos int, ok bool) {
 	// Any double Tab sequence in progress is no longer relevant, the
 	// same reasoning as the non-Tab branch below.
@@ -237,7 +255,10 @@ func (l *TreeListener) handleHelp(line []rune, pos int) (newLine []rune, newPos 
 
 	tokens, restored, restoredPos := helpTokensAndRestoredBuffer(line, pos)
 
-	help := command.HelpForPath(l.position.Current().Tree, tokens, l.translator, l.listOptions)
+	tree := l.position.Current().Tree
+	tokens, _ = unwrapHelpTokens(tree, tokens)
+
+	help := command.HelpForPath(tree, tokens, l.translator, l.listOptions)
 	if help != "" {
 		fmt.Fprint(l.instance.Stdout(), l.currentPrompt+string(line[:pos-1])+"?\n"+help)
 	}
@@ -248,6 +269,57 @@ func (l *TreeListener) handleHelp(line []rune, pos int) (newLine []rune, newPos 
 // ----------------------------------------------------------------------
 // Private Functions - TreeListener
 // ----------------------------------------------------------------------
+
+// unwrapHelpTokens - This function detects when tokens resolves to
+// literally the "help" command with one or more leftover argument
+// tokens, and, when it does, resolves those leftover tokens against
+// this same tree instead of treating them as "help"'s own free-form
+// argument, repeating for as long as that keeps happening, "help help
+// con" for instance. This is what lets typing a command name after
+// "help" complete, and show contextual "?" help, exactly the way
+// typing that same name directly at the prompt already does, both
+// OnChange and handleHelp call this before doing anything else with
+// their own tokens, rather than each reimplementing the same unwrap.
+//
+// tree is checked by identity against its own literal "help" entry
+// rather than by comparing a resolved command's name, since the word a
+// session actually has to type to reach this feature is always the
+// exact literal "help" registered in var/tree/level_common.yaml, see
+// cmd/core/cmd_help.go, the same way key == '?' above matches "?" by
+// its own literal rune rather than by name.
+//
+// The returned prefix, ending in a single trailing space whenever it
+// is non-empty, is the literal text, "help " for one level of
+// unwrapping, that a caller needs to prepend to whatever it builds
+// from the returned tokens, so a rewritten line still reads on screen
+// exactly as "help ..." rather than silently dropping the word that
+// got the caller here. handleHelp has no use for this prefix, since
+// what it prints is built from the raw typed line already, not from
+// tokens, and simply discards it.
+func unwrapHelpTokens(tree map[string]*command.Command, tokens []string) (resolvedTokens []string, prefix string) {
+	resolvedTokens = tokens
+	for {
+		res := command.Resolve(tree, resolvedTokens)
+		if len(res.Ambiguous) > 0 || res.Command == nil || len(res.Args) == 0 || !isHelpCommand(tree, res.Command) {
+			return resolvedTokens, prefix
+		}
+		prefix += strings.Join(res.FullName, " ") + " "
+		resolvedTokens = res.Args
+	}
+}
+
+// isHelpCommand - This function reports whether cmd is exactly the
+// command reachable as "help" in tree, by pointer identity rather than
+// by name, so a resolved node that merely happens to be named "help"
+// somewhere other than the literal, real "help" entry, which should
+// never actually occur, is not mistaken for it. A tree with no "help"
+// entry at all, a Command Level built with skip_common: true for
+// instance, simply never matches, since tree["help"] is then nil and
+// cmd is never nil at either of unwrapHelpTokens's own call sites.
+func isHelpCommand(tree map[string]*command.Command, cmd *command.Command) bool {
+	target, ok := tree["help"]
+	return ok && target == cmd
+}
 
 // ambiguousRewriteBuffer - This function computes the rewritten line buffer for an
 // ambiguous match. It must include the ambiguous token itself, exactly as

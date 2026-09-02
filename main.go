@@ -115,30 +115,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "failed to load tree structure:", err)
 		os.Exit(1)
 	}
-	// Every Command Level in the manifest is loaded and validated, including
-	// its "run:" handler references, right here at startup. A broken
-	// level_config_if.yaml fails the program immediately, not the first time
-	// someone actually types "interface eth0" days from now. This covers every
-	// level uniformly, root swap or nested. Nothing here names "config" or
-	// "config-if" specifically. Adding a level to tree_structure.yaml gets it
-	// loaded and validated the same way with zero code changes, beyond the one
-	// small cmd_*.go file, in cmd/core or cmd/product, every level's enter and
-	// exit command always needs. See command/treestructure.go's own top of file
-	// comment.
+	// Every Command Level in the manifest is loaded and validated,
+	// including its "run:" handler references, right here at startup.
+	// A broken level_config_if.yaml fails the program immediately, not
+	// the first time someone actually types "interface eth0" days from
+	// now. This covers every level uniformly, root swap or nested.
+	// Nothing here names "config" or "config-if" specifically. Adding
+	// a level to tree_structure.yaml gets it loaded and validated the
+	// same way with zero code changes, beyond the one small cmd_*.go
+	// file, in cmd/core or cmd/product, every level's enter and exit
+	// command always needs. See command/treestructure.go's own top of
+	// file comment.
 
-	// A command whose own feature is turned off in configuration is pruned out
-	// of every level's Tree entirely, right here, before anything else touches
-	// these trees, rate limiter wiring included, so a disabled command never
-	// shows up in help, tab completion, or VerifyCommandLevels below, rather
-	// than existing and refusing. See command.PruneDisabledCommands's own doc
-	// comment and var/tree/level_user.yaml, which sets requires: totp and
-	// requires: password_change on its own two container commands. featureFlags
-	// is the complete set of flag names any tree file in this project is
-	// allowed to reference through requires:, a naming convention private to
-	// this file, not something package command itself defines. Adding a new
-	// gated feature later means adding its own entry here, naming whichever
-	// SystemConfig boolean actually controls it.
-	//
+	// A command whose own feature is turned off in configuration is
+	// pruned out of every level's Tree entirely, right here, before
+	// anything else touches these trees, rate limiter wiring included,
+	// so a disabled command never shows up in help, tab completion, or
+	// VerifyCommandLevels below, rather than existing and refusing.
+	// See command.PruneDisabledCommands's own doc comment and
+	// var/tree/level_user.yaml, which sets requires: totp and
+	// requires: password_change on its own two container commands.
+	// featureFlags is the complete set of flag names any tree file in
+	// this project is allowed to reference through requires:, a naming
+	// convention private to this file, not something package command
+	// itself defines. Adding a new gated feature later means adding
+	// its own entry here, naming whichever SystemConfig boolean
+	// actually controls it.
 	featureFlags := map[string]bool{
 		"totp":            config.EnableTOTPAuthentication,
 		"password_change": config.EnableCLIAuthentication,
@@ -311,8 +313,13 @@ func main() {
 		SuConfigTrustWindow: config.SuConfigTrustWindow.AsDuration(),
 		// StartupConfigFile is threaded through unconditionally, unlike
 		// UsersFile below, since it has a real default regardless of
-		// AuthRequired, see config.DefaultSystemConfig.
+		// AuthRequired, see config.DefaultSystemConfig. ProductName is
+		// threaded through the same way, for the same reason: "help
+		// <command>" builds its own man page style header from it
+		// whether or not this deployment requires authentication at
+		// all, see command.AppContext.ProductName's own doc comment.
 		StartupConfigFile: config.StartupConfigFile,
+		ProductName:       config.ProductName,
 		RolesFile:         config.RolesFile,
 		DefaultsDir:       config.DefaultsDir,
 		// AuthRequired is copied straight from config here as well, the

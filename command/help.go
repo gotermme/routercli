@@ -278,3 +278,365 @@ func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, 
 		return ""
 	}
 }
+
+// defaultManPageWidth is the column width DetailedHelp's own header
+// line and wrapped body text fall back to whenever the width a caller
+// passes in is not a real, usable terminal width, the same 80 column
+// convention classic Unix man pages themselves default to, both nroff
+// and groff, when neither MANWIDTH nor a real terminal is available to
+// size against. minManPageWidth is the floor below which a passed in
+// width is treated as unusable rather than honored literally, so an
+// oddly small or zero value, a piped "help <command>" with no real
+// terminal behind it for instance, still produces a readable page
+// instead of wrapping every word onto its own line.
+const (
+	defaultManPageWidth = 80
+	minManPageWidth     = 40
+)
+
+// effectiveManPageWidth - This function returns width itself when it
+// is at least minManPageWidth, and defaultManPageWidth otherwise. Both
+// buildManPageHeader and the wrapping helpers below call this once on
+// whatever width DetailedHelp itself was given, so a caller with no
+// real terminal to measure, or one that simply passes zero, never
+// needs its own fallback logic.
+func effectiveManPageWidth(width int) int {
+	if width < minManPageWidth {
+		return defaultManPageWidth
+	}
+	return width
+}
+
+// manSectionIndent is how far a section's own body text is indented
+// under its all caps header. Four columns, narrower than a real man
+// page's own seven column tab stop, matches this project's own
+// preference, see the project instructions this whole codebase
+// follows, for compact, easy to read output over faithfully
+// reproducing groff's exact metrics.
+const manSectionIndent = "    "
+
+// buildManPageHeader - This function builds DetailedHelp's own first
+// line, name in all capitals mirrored on both the left and right
+// margins with a centered title in between, matching a real Unix man
+// page's own header line, its section number omitted since RouterCLI
+// has no man page "section" concept of its own to show. name is the
+// command's own full resolved path, "show running-config" for
+// instance, already space joined the same way DetailedHelp's own body
+// joins it. productName is the deployment's own configured display
+// name, see config.SystemConfig.ProductName and
+// AppContext.ProductName, falling back to "RouterCLI" itself, the
+// same default config.DefaultSystemConfig already ships, whenever the
+// caller passes an empty string, which every test in this package
+// that does not care about branding does, and which a hand built
+// AppContext in a cmd/core test, never setting ProductName itself,
+// also does by leaving the field at its own zero value. width is run
+// through effectiveManPageWidth first, so this never needs its own
+// fallback for an unusable value.
+//
+// The title, productName followed by "Help Information", is centered
+// in whatever space is left over after both copies of name, an odd
+// remaining column going to the right hand side, so "HOSTNAME"
+// centered against "RouterCLI Help Information" inside width reads
+// exactly the way the classic, mirrored man page header this project
+// modeled its own after does. A name long enough that both copies
+// together with the title would not fit inside width falls back to a
+// single space of padding on each side instead of a negative,
+// nonsensical gap, so an unusually long command path never panics or
+// produces a mangled line, only a header wider than width itself.
+func buildManPageHeader(name, productName string, width int) string {
+	if productName == "" {
+		productName = "RouterCLI"
+	}
+	width = effectiveManPageWidth(width)
+	upper := strings.ToUpper(name)
+	title := productName + " Help Information"
+
+	pad := width - len(upper)*2 - len(title)
+	if pad < 2 {
+		return upper + " " + title + " " + upper
+	}
+	leftPad := pad / 2
+	rightPad := pad - leftPad
+	return upper + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + upper
+}
+
+// indentManBody - This function prefixes every line of body with
+// indent, with no rewrapping of its own, so the SUBCOMMANDS section's
+// own column aligned listing, see subcommandDetailLines, reads as a
+// properly indented block under its own all caps section header
+// without disturbing the column alignment a rewrap would break. A
+// blank line is left blank rather than padded with trailing
+// whitespace of its own. body's own trailing newline, if it has one,
+// is trimmed first so this never doubles it.
+//
+// NAME, SYNOPSIS, and DESCRIPTION, prose rather than a table, use
+// wrapAndIndent and wrapAndIndentParagraphs below instead, which
+// rewrap their own text to a given width before indenting it.
+func indentManBody(body, indent string) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	var b strings.Builder
+	for _, line := range lines {
+		if line == "" {
+			fmt.Fprintln(&b)
+			continue
+		}
+		fmt.Fprintf(&b, "%s%s\n", indent, line)
+	}
+	return b.String()
+}
+
+// wrapText - This function breaks text, a single logical run of
+// words with no paragraph structure of its own, into lines no wider
+// than width, breaking only at whitespace the way any ordinary word
+// wrap does, never hyphenating or otherwise splitting a word itself.
+// A single word longer than width is still placed on its own line
+// rather than truncated or forced to overflow onto a second one, so
+// this never panics or loses content, only occasionally produces one
+// line wider than requested. Field splitting through strings.Fields
+// also collapses any run of whitespace in text, including an embedded
+// newline, into the single space between words a rewrapped line
+// needs, so a caller does not need to normalize text first.
+func wrapText(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+
+	lines := []string{words[0]}
+	for _, word := range words[1:] {
+		last := lines[len(lines)-1]
+		if len(last)+1+len(word) > width {
+			lines = append(lines, word)
+			continue
+		}
+		lines[len(lines)-1] = last + " " + word
+	}
+	return lines
+}
+
+// wrapAndIndent - This function wraps text, a single prose line such
+// as DetailedHelp's own NAME or SYNOPSIS line, to width, run through
+// effectiveManPageWidth first the same way buildManPageHeader's own
+// width is, minus indent's own length, then prefixes every wrapped
+// line with indent, so a continuation line lands under the section
+// body's own left margin instead of back at column zero the way an
+// unwrapped, merely indented first line left it for a session's own
+// terminal to wrap on its own. A remaining width narrower than 20
+// columns, indent itself unusually wide relative to width, floors to
+// 20 rather than wrapping one word per line.
+func wrapAndIndent(text, indent string, width int) string {
+	inner := effectiveManPageWidth(width) - len(indent)
+	if inner < 20 {
+		inner = 20
+	}
+
+	var b strings.Builder
+	for _, line := range wrapText(text, inner) {
+		fmt.Fprintf(&b, "%s%s\n", indent, line)
+	}
+	return b.String()
+}
+
+// wrapAndIndentParagraphs - This function wraps and indents body, a
+// longer, possibly multi paragraph Help body, the same way
+// wrapAndIndent does a single line, except that a blank line inside
+// body is honored as a genuine paragraph break: each paragraph is
+// rewrapped independently, through wrapAndIndent, and paragraphs are
+// separated by one blank line of their own in the result. A
+// paragraph's own internal line breaks, however body happened to be
+// typed in its source YAML file, are collapsed first, through
+// wrapText's own strings.Fields call, so every paragraph rewraps
+// cleanly at this deployment's own width rather than keeping
+// whatever arbitrary breaks the source file's own line length left
+// it with.
+func wrapAndIndentParagraphs(body, indent string, width int) string {
+	paragraphs := strings.Split(strings.TrimRight(body, "\n"), "\n\n")
+
+	var b strings.Builder
+	for i, p := range paragraphs {
+		if i > 0 {
+			fmt.Fprintln(&b)
+		}
+		fmt.Fprint(&b, wrapAndIndent(p, indent, width))
+	}
+	return b.String()
+}
+
+// DetailedHelp - This function builds a man page style description of
+// one specific command, everything RouterCLI knows about it in one
+// place, rather than only the "what can I type next" answer
+// HelpForPath gives. This is what `help <command>` in cmd/core's
+// "help" command calls; HelpForPath, and the interactive "?" and Tab
+// completion paths built on it, are unaffected by this function's
+// existence and keep answering their own, different question exactly
+// as before. tokens is the command path already split, "show",
+// "running-config" for instance, the same shape HelpForPath itself
+// takes. productName is the deployment's own configured display name,
+// see AppContext.ProductName, threaded straight through to
+// buildManPageHeader, which falls back to "RouterCLI" for an empty
+// string; every caller in this project's own test suite that does not
+// care about branding passes an empty string for exactly that reason.
+// width is this session's own effective terminal width, see
+// paging.EffectiveTerminalWidth, the same live detection "show
+// terminal" already reports, which cmd/core/cmd_help.go's "help"
+// handler computes and passes in; DetailedHelp itself stays free of
+// any dependency on package paging or a real terminal file
+// descriptor, and simply runs whatever it is given through
+// effectiveManPageWidth, so zero, a piped "help <command>" with no
+// real terminal behind it for instance, still produces a readable,
+// conventionally wide page rather than a degenerate one.
+//
+// A command's own detail block opens with one blank line, then a man
+// page style header line, see buildManPageHeader, then another blank
+// line, then a series of all caps section headers with their own body
+// text wrapped to width and indented beneath them, see wrapAndIndent,
+// wrapAndIndentParagraphs, and manSectionIndent, matching a real Unix
+// man page's own layout rather than this function's own earlier,
+// flatter form, and closes with one further blank line of its own, so
+// this whole block reads as one visually separated unit between the
+// command that asked for it and whatever prompt or output follows.
+//
+// NAME always appears, and holds the command's own full resolved
+// name, a hyphen, and its ResolvedDesc, or the bare name alone when no
+// description is set, matching HelpText's own bare-name fallback.
+// SYNOPSIS follows, only when the command actually takes an argument,
+// and holds the full name followed by ResolvedArgHelp, the same
+// content the older, flatter "Usage:" line held, renamed to match real
+// man page convention. DESCRIPTION follows, only when ResolvedHelp is
+// actually set, most commands have none today, and holds that
+// command's own longer, free-form body, rewrapped to width, a blank
+// line inside it honored as a real paragraph break. SUBCOMMANDS
+// follows last, only when the command has subcommands, and holds
+// subcommandDetailLines's own one level deep, column aligned listing,
+// indented but not rewrapped, matching HelpText's own established
+// convention of never recursing further than that. A command that is
+// itself already runnable and also has subcommands, "totp enable" for
+// example, gets both its own SYNOPSIS section and the SUBCOMMANDS
+// section together.
+//
+// tokens resolving ambiguously, a partial or abbreviated name matching
+// more than one command, prints the matching candidate names instead
+// of a detail block, the same real candidates "?" would show for the
+// same partial word, so a session sees what to narrow down to rather
+// than a bare refusal; there is no single command to build a header
+// line for here, so none is printed, and neither of the two framing
+// blank lines is added. tokens resolving to nothing at all returns an
+// empty string, the same "nothing to show" convention HelpForPath
+// already uses, leaving it to the caller, cmd/core/cmd_help.go's
+// "help" handler, to turn that into a real, translated error.
+func DetailedHelp(tree map[string]*Command, tokens []string, t *i18n.Translator, opts ListOptions, productName string, width int) string {
+	res := Resolve(tree, tokens)
+
+	if len(res.Ambiguous) > 0 {
+		names := SortCommandNames(res.Ambiguous, res.AmbiguousTree, opts)
+		var b strings.Builder
+		header := "Ambiguous; did you mean one of the following:"
+		if t != nil {
+			header = t.T("help.ambiguous")
+		}
+		fmt.Fprintln(&b, header)
+		for _, name := range names {
+			fmt.Fprintf(&b, "  %s\n", name)
+		}
+		return b.String()
+	}
+
+	if res.Command == nil {
+		return ""
+	}
+
+	name := strings.Join(res.FullName, " ")
+	var b strings.Builder
+
+	nameHeader, synopsisHeader, descHeader, subcommandsHeader :=
+		"NAME", "SYNOPSIS", "DESCRIPTION", "SUBCOMMANDS"
+	if t != nil {
+		nameHeader = t.T("help.section.name")
+		synopsisHeader = t.T("help.section.synopsis")
+		descHeader = t.T("help.section.description")
+		subcommandsHeader = t.T("help.section.subcommands")
+	}
+
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, buildManPageHeader(name, productName, width))
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, nameHeader)
+	nameLine := name
+	if desc := res.Command.ResolvedDesc(t); desc != "" {
+		nameLine = name + " - " + desc
+	}
+	fmt.Fprint(&b, wrapAndIndent(nameLine, manSectionIndent, width))
+
+	if hint := res.Command.ResolvedArgHelp(t); hint != "" {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, synopsisHeader)
+		fmt.Fprint(&b, wrapAndIndent(name+" "+hint, manSectionIndent, width))
+	}
+
+	if help := res.Command.ResolvedHelp(t); help != "" {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, descHeader)
+		fmt.Fprint(&b, wrapAndIndentParagraphs(help, manSectionIndent, width))
+	}
+
+	if len(res.Command.Subcommands) > 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, subcommandsHeader)
+		fmt.Fprint(&b, indentManBody(subcommandDetailLines(res.Command.Subcommands, t, opts), manSectionIndent))
+	}
+
+	fmt.Fprintln(&b)
+
+	return b.String()
+}
+
+// subcommandDetailLines - This function renders the one level deep,
+// name-and-description-and-usage-hint listing DetailedHelp's own
+// Subcommands section uses, a skipped-Hidden, column aligned on name
+// listing in the same spirit as HelpText, but with each subcommand's
+// own ResolvedArgHelp appended in parentheses when it has one, which
+// HelpText's own plain listing never shows. This lives as its own
+// function, rather than inline in DetailedHelp, purely for that
+// function's own readability; nothing else calls this today.
+//
+// Each line carries no left margin of its own. DetailedHelp's own
+// caller applies manSectionIndent through indentManBody, the same
+// section margin NAME, SYNOPSIS, and DESCRIPTION already get, so a
+// margin built in here as well would double it, six columns instead
+// of four.
+func subcommandDetailLines(subcommands map[string]*Command, t *i18n.Translator, opts ListOptions) string {
+	var names []string
+	for name, cmd := range subcommands {
+		if cmd.Hidden {
+			continue
+		}
+		names = append(names, name)
+	}
+	names = SortCommandNames(names, subcommands, opts)
+
+	longest := 0
+	for _, name := range names {
+		if len(name) > longest {
+			longest = len(name)
+		}
+	}
+
+	var b strings.Builder
+	for _, name := range names {
+		cmd := subcommands[name]
+		desc := cmd.ResolvedDesc(t)
+		hint := cmd.ResolvedArgHelp(t)
+		switch {
+		case desc == "" && hint == "":
+			fmt.Fprintf(&b, "%s\n", name)
+		case hint == "":
+			fmt.Fprintf(&b, "%-*s  %s\n", longest, name, desc)
+		case desc == "":
+			fmt.Fprintf(&b, "%-*s  (%s)\n", longest, name, hint)
+		default:
+			fmt.Fprintf(&b, "%-*s  %s  (%s)\n", longest, name, desc, hint)
+		}
+	}
+	return b.String()
+}

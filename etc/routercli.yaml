@@ -1,5 +1,14 @@
 # routercli YAML configuration file
 
+# --- Product Identity ---
+# ProductName is this deployment's own display name. It is used to
+# build the centered title of "help <command>"'s own man page style
+# header line, "<ProductName> Help Information", so a project built on
+# top of RouterCLI can show its own name there instead of the
+# framework's. The default is "RouterCLI" itself.
+ProductName: RouterCLI
+
+
 # --- Command Tree Location ---
 TreeStructure: var/tree/tree_structure.yaml
 

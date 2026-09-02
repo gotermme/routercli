@@ -234,8 +234,17 @@ listing. It is only used when `DescKey` is empty.
 
 #### `help`
 
-This property is the help text shown for this command. It is only used when
-`HelpKey` is empty. The output of the `help` command is generated dynamically.
+This property is a longer, man page style body of text describing this
+command in full, shown as part of `help <command>`'s own detailed
+output, `command.DetailedHelp`, alongside this command's `desc`, its
+`arghelp`, and, for a command with subcommands, a listing of them.
+It is only used when `HelpKey` is empty, and it is entirely optional;
+a command with nothing set here still gets a useful `help <command>`
+answer built from its other properties alone. This is a different
+thing from `command.HelpText`, which is what the plain `help` command,
+typed with nothing after it, and `?` both use for their own one level
+deep listing; see `README.md`'s own section on the `help` command for
+the full picture.
 
 #### `arghelp`
 
@@ -406,7 +415,10 @@ function, and an interactive prompt captured that way would never actually
 reach the person who needs to answer it. Every command in
 `var/tree/level_base.yaml` that only prints and returns, `show version`,
 `show interface`, `show running-config`, `show startup-config`, and `show
-terminal` among them, sets `pageable: true`. A command line that types a
+terminal` among them, sets `pageable: true`. `help`, in `var/tree/level_common.yaml`,
+sets it as well, `help <command>` printing its whole man page style answer
+up front with nothing further read from the terminal, the same safe shape
+every `show` command already has. A command line that types a
 pipe filter against a command left at the default `false` is refused with
 an error rather than silently ignoring the filter and running the command
 anyway. See `README.md`'s own section on output paging and filtering for

@@ -59,6 +59,7 @@ commands:
     subcommands:
       description:
         desc_key: set.description.desc
+        arghelp_key: set.description.arghelp
         minargs: 1
         maxargs: 1
         maxarglength: 256
@@ -85,6 +86,7 @@ commands:
         run: language.list
       set:
         desc_key: language.set.desc
+        arghelp_key: language.set.arghelp
         minargs: 1
         maxargs: 1
         run: language.set

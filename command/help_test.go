@@ -355,6 +355,614 @@ func TestHelpForPathLeafWithOptionalArgumentShowsHintAndCR(t *testing.T) {
 
 // ----------------------------------------------------------------------
 //
+// DetailedHelp
+//
+// ----------------------------------------------------------------------
+
+// TestDetailedHelpLeafShowsNameDescAndUsage - This test verifies that
+// DetailedHelp for a plain leaf command with an ArgHelp set prints a
+// man page style header line, a NAME section holding its own name, a
+// hyphen, and its description, and a SYNOPSIS section built from its
+// ArgHelp, and nothing else, no DESCRIPTION section since no Help body
+// is set here, and no SUBCOMMANDS section since it has none. It also
+// verifies the one blank line before the header and the one blank
+// line after the whole block, see DetailedHelp's own doc comment.
+func TestDetailedHelpLeafShowsNameDescAndUsage(t *testing.T) {
+	tree := map[string]*Command{
+		"alias": {
+			Desc:    "Set a runtime defined short name for a command",
+			ArgHelp: "<alias> <word...>  The short name to type from this Command Level from now on.",
+		},
+	}
+	got := DetailedHelp(tree, []string{"alias"}, nil, DefaultListOptions(), "", 0)
+
+	if !strings.HasPrefix(got, "\nALIAS") {
+		t.Errorf("DetailedHelp(alias) = %q, expected one blank line before the mirrored ALIAS header", got)
+	}
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("DetailedHelp(alias) = %q, expected one blank line after the whole block", got)
+	}
+	if !strings.Contains(got, "RouterCLI Help Information") {
+		t.Errorf("DetailedHelp(alias) = %q, expected the default RouterCLI title in the header", got)
+	}
+	if !strings.Contains(got, "NAME") || !strings.Contains(got, "alias - Set a runtime defined short name for a command") {
+		t.Errorf("DetailedHelp(alias) = %q, expected a NAME section with the name, a hyphen, and the description", got)
+	}
+	if !strings.Contains(got, "SYNOPSIS") || !strings.Contains(got, "<alias> <word...>") {
+		t.Errorf("DetailedHelp(alias) = %q, expected a SYNOPSIS section built from ArgHelp", got)
+	}
+	if strings.Contains(got, "DESCRIPTION") {
+		t.Errorf("DetailedHelp(alias) = %q, expected no DESCRIPTION section: no Help body is set", got)
+	}
+	if strings.Contains(got, "SUBCOMMANDS") {
+		t.Errorf("DetailedHelp(alias) = %q, expected no SUBCOMMANDS section for a plain leaf", got)
+	}
+}
+
+// TestDetailedHelpLeafWithNoArgHelpShowsOnlyNameAndDesc - This test
+// verifies that a leaf command with no ArgHelp set, "enable" for
+// instance, shows the man page header and a NAME section only, never
+// the bare, unhelpful "<cr>" HelpForPath itself would show for the
+// same command, the exact complaint that led to DetailedHelp existing
+// as its own function separate from HelpForPath. It also pins the
+// exact output, blank line framing included, for a short command that
+// fits on one wrapped line.
+func TestDetailedHelpLeafWithNoArgHelpShowsOnlyNameAndDesc(t *testing.T) {
+	tree := map[string]*Command{
+		"enable": {Desc: "Enter privileged exec mode"},
+	}
+	got := DetailedHelp(tree, []string{"enable"}, nil, DefaultListOptions(), "", 0)
+
+	want := "\n" + buildManPageHeader("enable", "", 0) + "\n\nNAME\n    enable - Enter privileged exec mode\n\n"
+	if got != want {
+		t.Errorf("DetailedHelp(enable) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "SYNOPSIS") || strings.Contains(got, "DESCRIPTION") || strings.Contains(got, "SUBCOMMANDS") {
+		t.Errorf("DetailedHelp(enable) = %q, expected no other sections", got)
+	}
+}
+
+// TestDetailedHelpIncludesResolvedHelpBodyWhenSet - This test verifies
+// that a command with a Help body set, the long form man page style
+// text ResolvedHelp resolves, has that body printed, indented, under
+// its own DESCRIPTION section.
+func TestDetailedHelpIncludesResolvedHelpBodyWhenSet(t *testing.T) {
+	tree := map[string]*Command{
+		"configure": {
+			Desc: "Enter configuration mode",
+			Help: "This is the long form explanation of what configuration mode actually does.",
+		},
+	}
+	got := DetailedHelp(tree, []string{"configure"}, nil, DefaultListOptions(), "", 0)
+
+	if !strings.Contains(got, "DESCRIPTION") {
+		t.Errorf("DetailedHelp(configure) = %q, expected a DESCRIPTION section", got)
+	}
+	if !strings.Contains(got, manSectionIndent+"This is the long form explanation") {
+		t.Errorf("DetailedHelp(configure) = %q, expected the command's own Help body, indented", got)
+	}
+}
+
+// TestDetailedHelpWrapsLongDescriptionAndIndentsContinuationLines -
+// This test verifies the fix for the actual complaint that led to
+// this round of work: a DESCRIPTION body longer than one line used to
+// print as one very long logical line, indented only where it
+// started, so every continuation line the terminal itself wrapped
+// landed back at column zero instead of under the section's own left
+// margin. With a narrow width passed in, a body several words long
+// wraps into more than one line, and every one of those lines,
+// including every continuation line, carries the same indent prefix.
+func TestDetailedHelpWrapsLongDescriptionAndIndentsContinuationLines(t *testing.T) {
+	tree := map[string]*Command{
+		"configure": {
+			Desc: "Enter configuration mode",
+			Help: "This sentence is deliberately long enough that it must wrap across more than one line at a narrow width.",
+		},
+	}
+	got := DetailedHelp(tree, []string{"configure"}, nil, DefaultListOptions(), "", 40)
+
+	descIdx := strings.Index(got, "DESCRIPTION\n")
+	if descIdx == -1 {
+		t.Fatalf("DetailedHelp(configure) = %q, expected a DESCRIPTION section", got)
+	}
+	body := got[descIdx+len("DESCRIPTION\n"):]
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("DetailedHelp(configure) DESCRIPTION body = %q, expected it to wrap across more than one line at width 40", body)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, manSectionIndent) {
+			t.Errorf("DetailedHelp(configure) DESCRIPTION line %q is missing its own indent, the exact bug this test guards against", line)
+		}
+		if len(line) > 40 {
+			t.Errorf("DetailedHelp(configure) DESCRIPTION line %q is %d columns wide, wider than the requested width 40", line, len(line))
+		}
+	}
+}
+
+// TestDetailedHelpWrapsSynopsisAndKeepsMultipleParagraphsSeparate -
+// This test verifies two more parts of the same wrapping fix: a
+// SYNOPSIS line built from a long ArgHelp wraps and indents its own
+// continuation lines the same way DESCRIPTION does, and a DESCRIPTION
+// body with more than one paragraph, separated by a blank line in the
+// source text, keeps that same blank line between the two paragraphs
+// in the wrapped, indented result, rather than running them together.
+func TestDetailedHelpWrapsSynopsisAndKeepsMultipleParagraphsSeparate(t *testing.T) {
+	tree := map[string]*Command{
+		"alias": {
+			Desc:    "Set a runtime defined short name for a command",
+			ArgHelp: "<alias> <word...>  The short name to type from this Command Level from now on, and the real command it expands to.",
+			Help:    "First paragraph explaining one thing at some length so it needs to wrap.\n\nSecond paragraph explaining something else, also long enough to wrap on its own.",
+		},
+	}
+	got := DetailedHelp(tree, []string{"alias"}, nil, DefaultListOptions(), "", 40)
+
+	synIdx := strings.Index(got, "SYNOPSIS\n")
+	descIdx := strings.Index(got, "DESCRIPTION\n")
+	if synIdx == -1 || descIdx == -1 || descIdx < synIdx {
+		t.Fatalf("DetailedHelp(alias) = %q, expected SYNOPSIS before DESCRIPTION", got)
+	}
+	synopsis := got[synIdx+len("SYNOPSIS\n") : descIdx]
+	synLines := strings.Split(strings.TrimRight(synopsis, "\n"), "\n")
+	if len(synLines) < 2 {
+		t.Fatalf("DetailedHelp(alias) SYNOPSIS = %q, expected it to wrap across more than one line at width 40", synopsis)
+	}
+	for _, line := range synLines {
+		if !strings.HasPrefix(line, manSectionIndent) {
+			t.Errorf("DetailedHelp(alias) SYNOPSIS line %q is missing its own indent", line)
+		}
+	}
+
+	description := got[descIdx+len("DESCRIPTION\n"):]
+	if !strings.Contains(description, "\n\n") {
+		t.Errorf("DetailedHelp(alias) DESCRIPTION = %q, expected the two source paragraphs to stay separated by a blank line", description)
+	}
+}
+
+// TestDetailedHelpContainerListsSubcommandsWithUsage - This test
+// verifies that a container command's own SUBCOMMANDS section lists
+// each child's name, description, and its own ArgHelp in parentheses
+// when it has one, one level deep, indented under the section header,
+// a Hidden child excluded entirely, and that this listing is indented
+// only, never rewrapped, so its own name column stays aligned even
+// when a narrow width is passed in, unlike the prose sections above.
+func TestDetailedHelpContainerListsSubcommandsWithUsage(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {
+			Desc: "Show information",
+			Subcommands: map[string]*Command{
+				"version": {Desc: "Show the running software version"},
+				"interface": {
+					Desc:    "Show one interface's own state",
+					ArgHelp: "<name>  The interface to show.",
+				},
+				"secret": {Desc: "Should never appear", Hidden: true},
+			},
+		},
+	}
+	got := DetailedHelp(tree, []string{"show"}, nil, DefaultListOptions(), "", 40)
+
+	if !strings.Contains(got, "SUBCOMMANDS") {
+		t.Errorf("DetailedHelp(show) = %q, expected a SUBCOMMANDS section", got)
+	}
+	if !strings.Contains(got, "version") || !strings.Contains(got, "Show the running software version") {
+		t.Errorf("DetailedHelp(show) = %q, expected version's own name and description", got)
+	}
+	if !strings.Contains(got, "interface") || !strings.Contains(got, "(<name>  The interface to show.)") {
+		t.Errorf("DetailedHelp(show) = %q, expected interface's own name, description, and usage hint in parentheses", got)
+	}
+	if strings.Contains(got, "secret") {
+		t.Errorf("DetailedHelp(show) = %q, a Hidden subcommand must never appear", got)
+	}
+	if !strings.Contains(got, "Show the running software version") {
+		t.Errorf("DetailedHelp(show) = %q, expected the SUBCOMMANDS listing to stay on one line per entry, unwrapped, even at a narrow width", got)
+	}
+	if !strings.Contains(got, "\n"+manSectionIndent+"version") {
+		t.Errorf("DetailedHelp(show) = %q, expected the SUBCOMMANDS listing indented by exactly manSectionIndent, not doubled up with subcommandDetailLines's own now removed margin", got)
+	}
+}
+
+// TestDetailedHelpRunnableContainerShowsBothUsageAndSubcommands - This
+// test verifies that a command that is both directly runnable and has
+// its own subcommands, "totp enable" for example, gets its own
+// SYNOPSIS section, from its own ArgHelp, together with the
+// SUBCOMMANDS section listing what is nested below it, rather than one
+// replacing the other.
+func TestDetailedHelpRunnableContainerShowsBothUsageAndSubcommands(t *testing.T) {
+	tree := map[string]*Command{
+		"totp": {
+			Subcommands: map[string]*Command{
+				"enable": {
+					Desc:    "Enroll this account in TOTP",
+					ArgHelp: "[qr]  Optionally also show a scannable QR code.",
+					RunFunc: func(*AppContext, []string) error { return nil },
+					Subcommands: map[string]*Command{
+						"qr": {Desc: "Also show a scannable QR code"},
+					},
+				},
+			},
+		},
+	}
+	got := DetailedHelp(tree, []string{"totp", "enable"}, nil, DefaultListOptions(), "", 0)
+
+	if !strings.Contains(got, "SYNOPSIS") || !strings.Contains(got, "[qr]") {
+		t.Errorf("DetailedHelp(totp enable) = %q, expected its own SYNOPSIS section", got)
+	}
+	if !strings.Contains(got, "SUBCOMMANDS") || !strings.Contains(got, "qr") {
+		t.Errorf("DetailedHelp(totp enable) = %q, expected a SUBCOMMANDS section listing qr", got)
+	}
+}
+
+// TestDetailedHelpContainerWithNoDescShowsBareName - This test
+// verifies that a container command with no description of its own
+// prints its bare name alone in the NAME section, no trailing hyphen
+// with nothing after it, matching HelpText's own established
+// bare-name fallback for the same situation.
+func TestDetailedHelpContainerWithNoDescShowsBareName(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {
+			Subcommands: map[string]*Command{
+				"version": {Desc: "Show the running software version"},
+			},
+		},
+	}
+	got := DetailedHelp(tree, []string{"show"}, nil, DefaultListOptions(), "", 0)
+
+	if !strings.Contains(got, "NAME\n"+manSectionIndent+"show\n") {
+		t.Errorf("DetailedHelp(show) = %q, expected the bare name alone under NAME", got)
+	}
+}
+
+// TestDetailedHelpAmbiguousListsCandidates - This test verifies that a
+// partial name matching more than one command prints the matching
+// candidate names, the same real candidates "?" would show for the
+// same partial word, rather than a detail block or an outright
+// refusal, and prints no man page header, or its framing blank lines,
+// since there is no single command to build one for.
+func TestDetailedHelpAmbiguousListsCandidates(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {Desc: "Show information"},
+		"set":  {Desc: "Set something"},
+	}
+	got := DetailedHelp(tree, []string{"s"}, nil, DefaultListOptions(), "", 0)
+
+	if !strings.Contains(got, "show") || !strings.Contains(got, "set") {
+		t.Errorf("DetailedHelp(s) = %q, expected both candidate names listed", got)
+	}
+	if strings.Contains(got, "Help Information") {
+		t.Errorf("DetailedHelp(s) = %q, expected no man page header for an ambiguous match", got)
+	}
+	if strings.HasPrefix(got, "\n") {
+		t.Errorf("DetailedHelp(s) = %q, expected no leading blank line for an ambiguous match", got)
+	}
+}
+
+// TestDetailedHelpUnknownPathReturnsEmpty - This test verifies that a
+// path resolving to nothing at all returns an empty string, the same
+// "nothing to show" convention HelpForPath already uses, leaving the
+// caller, cmd/core/cmd_help.go's "help" handler, to turn that into a
+// real, translated error.
+func TestDetailedHelpUnknownPathReturnsEmpty(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {Desc: "Show information"},
+	}
+	got := DetailedHelp(tree, []string{"bogus"}, nil, DefaultListOptions(), "", 0)
+
+	if got != "" {
+		t.Errorf("DetailedHelp(bogus) = %q, want empty string", got)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// buildManPageHeader
+//
+// ----------------------------------------------------------------------
+
+// TestBuildManPageHeaderMirrorsNameAndCentersTitle - This test
+// verifies the header line's own classic, mirrored man page shape: the
+// command's own name in all capitals appears at both the very start
+// and the very end of the line, and the centered title in between
+// contains the product name followed by "Help Information". The exact
+// column widths are covered separately, below; this test only checks
+// the shape a person actually reads.
+func TestBuildManPageHeaderMirrorsNameAndCentersTitle(t *testing.T) {
+	got := buildManPageHeader("hostname", "RouterCLI", 0)
+
+	if !strings.HasPrefix(got, "HOSTNAME") {
+		t.Errorf("buildManPageHeader(hostname) = %q, expected it to start with HOSTNAME", got)
+	}
+	if !strings.HasSuffix(got, "HOSTNAME") {
+		t.Errorf("buildManPageHeader(hostname) = %q, expected it to end with HOSTNAME", got)
+	}
+	if !strings.Contains(got, "RouterCLI Help Information") {
+		t.Errorf("buildManPageHeader(hostname) = %q, expected the centered RouterCLI Help Information title", got)
+	}
+	if strings.Count(got, "HOSTNAME") != 2 {
+		t.Errorf("buildManPageHeader(hostname) = %q, expected exactly two HOSTNAME copies bracketing the title", got)
+	}
+}
+
+// TestBuildManPageHeaderUsesConfiguredProductName - This test verifies
+// that a deployment's own configured product name, not the literal
+// word "RouterCLI", drives the centered title, so a project built on
+// top of this framework sees its own name there.
+func TestBuildManPageHeaderUsesConfiguredProductName(t *testing.T) {
+	got := buildManPageHeader("hostname", "AcmeRouter", 0)
+
+	if !strings.Contains(got, "AcmeRouter Help Information") {
+		t.Errorf("buildManPageHeader(hostname, AcmeRouter) = %q, expected the AcmeRouter Help Information title", got)
+	}
+	if strings.Contains(got, "RouterCLI") {
+		t.Errorf("buildManPageHeader(hostname, AcmeRouter) = %q, expected no trace of the RouterCLI default", got)
+	}
+}
+
+// TestBuildManPageHeaderEmptyProductNameFallsBackToRouterCLI - This
+// test verifies that an empty product name, exactly what a hand built
+// AppContext in a test never setting ProductName produces, falls back
+// to "RouterCLI" itself, the same default config.DefaultSystemConfig
+// ships, rather than leaving a blank hole in the title.
+func TestBuildManPageHeaderEmptyProductNameFallsBackToRouterCLI(t *testing.T) {
+	got := buildManPageHeader("hostname", "", 0)
+
+	if !strings.Contains(got, "RouterCLI Help Information") {
+		t.Errorf("buildManPageHeader(hostname, \"\") = %q, expected the RouterCLI fallback title", got)
+	}
+}
+
+// TestBuildManPageHeaderIsExactlyDefaultWidthWhenWidthIsUnusable -
+// This test verifies that, for an ordinary short command name, a
+// width below minManPageWidth, zero included, falls back to
+// defaultManPageWidth, the same fixed 80 column convention this
+// function always used before width became a parameter, so a caller
+// with no real terminal to measure still gets a page formatted at a
+// sane, conventional width rather than a degenerate one.
+func TestBuildManPageHeaderIsExactlyDefaultWidthWhenWidthIsUnusable(t *testing.T) {
+	for _, width := range []int{0, -1, minManPageWidth - 1} {
+		got := buildManPageHeader("hostname", "RouterCLI", width)
+		if len(got) != defaultManPageWidth {
+			t.Errorf("buildManPageHeader(hostname, RouterCLI, %d) has length %d, want exactly defaultManPageWidth (%d)", width, len(got), defaultManPageWidth)
+		}
+	}
+}
+
+// TestBuildManPageHeaderHonorsARealWidth - This test verifies that a
+// width at or above minManPageWidth is honored literally rather than
+// replaced by defaultManPageWidth, so a session with a genuinely wide
+// or narrow terminal gets a header actually sized to it.
+func TestBuildManPageHeaderHonorsARealWidth(t *testing.T) {
+	for _, width := range []int{minManPageWidth, 60, 120} {
+		got := buildManPageHeader("cmd", "RouterCLI", width)
+		if len(got) != width {
+			t.Errorf("buildManPageHeader(cmd, RouterCLI, %d) has length %d, want exactly %d", width, len(got), width)
+		}
+	}
+}
+
+// TestBuildManPageHeaderLongNameDoesNotPanicOrGoNegative - This test
+// verifies that a command name long enough that two mirrored copies
+// plus the title would overflow width still produces a sane,
+// single-space-padded line, wider than width itself, rather than
+// panicking on a negative repeat count or producing a mangled,
+// overlapping result.
+func TestBuildManPageHeaderLongNameDoesNotPanicOrGoNegative(t *testing.T) {
+	longName := "show running-config interface gigabitethernet0/0/1 statistics detail"
+	got := buildManPageHeader(longName, "RouterCLI", 0)
+
+	upper := strings.ToUpper(longName)
+	want := upper + " RouterCLI Help Information " + upper
+	if got != want {
+		t.Errorf("buildManPageHeader(longName) = %q, want %q", got, want)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// indentManBody
+//
+// ----------------------------------------------------------------------
+
+// TestIndentManBodyIndentsEveryNonBlankLineAndPreservesBlankOnes -
+// This test verifies that every non-blank line of a multi line body
+// gets indent prefixed, a blank line, a paragraph break, is left
+// blank rather than padded, and the result carries no doubled trailing
+// newline. indentManBody itself never rewraps; TestIndentManBodyNeverRewraps
+// below covers that directly.
+func TestIndentManBodyIndentsEveryNonBlankLineAndPreservesBlankOnes(t *testing.T) {
+	body := "First paragraph.\n\nSecond paragraph, two lines,\nstill one section.\n"
+	got := indentManBody(body, "    ")
+
+	want := "    First paragraph.\n\n    Second paragraph, two lines,\n    still one section.\n"
+	if got != want {
+		t.Errorf("indentManBody(...) = %q, want %q", got, want)
+	}
+}
+
+// TestIndentManBodyNeverRewraps - This test verifies that indentManBody
+// leaves an already long line exactly as long as it started, indent
+// aside, since it backs the SUBCOMMANDS section's own column aligned
+// table, see subcommandDetailLines, where rewrapping would break the
+// alignment between the name and description columns.
+func TestIndentManBodyNeverRewraps(t *testing.T) {
+	line := "version         Show the running software version  (<n>  A very long argument hint that would wrap at a narrow width)"
+	got := indentManBody(line+"\n", "    ")
+
+	want := "    " + line + "\n"
+	if got != want {
+		t.Errorf("indentManBody(...) = %q, want %q, unwrapped", got, want)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// wrapText, wrapAndIndent, and wrapAndIndentParagraphs
+//
+// ----------------------------------------------------------------------
+
+// TestWrapTextBreaksOnlyAtWhitespace - This test verifies the basic
+// word wrap shape: words are packed onto each line up to width, a
+// line never exceeds width unless a single word alone already does,
+// and no word is ever split or hyphenated.
+func TestWrapTextBreaksOnlyAtWhitespace(t *testing.T) {
+	got := wrapText("one two three four five six seven eight nine ten", 20)
+
+	if len(got) < 2 {
+		t.Fatalf("wrapText(...) = %v, expected more than one line at width 20", got)
+	}
+	for _, line := range got {
+		if len(line) > 20 {
+			t.Errorf("wrapText(...) produced line %q, %d columns wide, wider than width 20", line, len(line))
+		}
+		for _, word := range strings.Fields(line) {
+			if strings.Contains("one two three four five six seven eight nine ten", word) == false {
+				t.Errorf("wrapText(...) produced word %q not present in the source text; a word was corrupted", word)
+			}
+		}
+	}
+	rejoined := strings.Join(got, " ")
+	if rejoined != "one two three four five six seven eight nine ten" {
+		t.Errorf("wrapText(...) rejoined = %q, want the original text unchanged, no words lost or reordered", rejoined)
+	}
+}
+
+// TestWrapTextSingleWordLongerThanWidthOverflowsRatherThanSplitting -
+// This test verifies that a single word longer than width is placed
+// on its own line rather than truncated, corrupted, or split with a
+// hyphen this project's own style guide reserves for real compound
+// words only.
+func TestWrapTextSingleWordLongerThanWidthOverflowsRatherThanSplitting(t *testing.T) {
+	got := wrapText("short averyveryverylongwordindeed short", 10)
+
+	found := false
+	for _, line := range got {
+		if line == "averyveryverylongwordindeed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("wrapText(...) = %v, expected the long word to survive intact on its own line", got)
+	}
+}
+
+// TestWrapTextEmptyTextReturnsNil - This test verifies that empty or
+// all whitespace text produces no lines at all, rather than one empty
+// line, so a caller such as wrapAndIndentParagraphs never prints a
+// stray indent with nothing after it.
+func TestWrapTextEmptyTextReturnsNil(t *testing.T) {
+	for _, text := range []string{"", "   ", "\n\n"} {
+		if got := wrapText(text, 40); got != nil {
+			t.Errorf("wrapText(%q, 40) = %v, want nil", text, got)
+		}
+	}
+}
+
+// TestWrapAndIndentPrefixesEveryWrappedLine - This test verifies that
+// wrapAndIndent both wraps text to width and prefixes every resulting
+// line, continuation lines included, with indent, the fix for the
+// original complaint: a continuation line landing back at column zero
+// instead of under the section's own left margin.
+func TestWrapAndIndentPrefixesEveryWrappedLine(t *testing.T) {
+	got := wrapAndIndent("one two three four five six seven eight", "    ", minManPageWidth)
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+
+	if len(lines) < 2 {
+		t.Fatalf("wrapAndIndent(...) = %q, expected more than one line", got)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "    ") {
+			t.Errorf("wrapAndIndent(...) line %q is missing its own indent", line)
+		}
+	}
+}
+
+// TestWrapAndIndentFloorsAtTwentyColumnsWhenIndentIsWide - This test
+// verifies that an indent wide enough, relative to width, to leave
+// less than 20 columns for the text itself still wraps at a floor of
+// 20 rather than degenerating into one word per line.
+func TestWrapAndIndentFloorsAtTwentyColumnsWhenIndentIsWide(t *testing.T) {
+	got := wrapAndIndent("one two three four five six", strings.Repeat(" ", 30), 40)
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+
+	oneWordLines := 0
+	for _, line := range lines {
+		if len(strings.Fields(line)) == 1 {
+			oneWordLines++
+		}
+	}
+	if oneWordLines == len(lines) {
+		t.Errorf("wrapAndIndent(...) = %q, every line held exactly one word; expected the 20 column floor to pack more than one word per line", got)
+	}
+}
+
+// TestWrapAndIndentParagraphsSeparatesParagraphsWithOneBlankLine -
+// This test verifies that a blank line in body, a real paragraph
+// break, survives as exactly one blank line in the wrapped, indented
+// result, and that each paragraph rewraps independently rather than
+// being joined into one continuous run of text.
+func TestWrapAndIndentParagraphsSeparatesParagraphsWithOneBlankLine(t *testing.T) {
+	body := "First paragraph, several words long, enough to wrap.\n\nSecond paragraph, also several words long, enough to wrap on its own."
+	got := wrapAndIndentParagraphs(body, "    ", 30)
+
+	if !strings.Contains(got, "\n\n") {
+		t.Fatalf("wrapAndIndentParagraphs(...) = %q, expected a blank line between the two paragraphs", got)
+	}
+	parts := strings.SplitN(got, "\n\n", 2)
+	if !strings.Contains(parts[0], "First paragraph") {
+		t.Errorf("wrapAndIndentParagraphs(...) first part = %q, expected it to hold the first paragraph", parts[0])
+	}
+	if !strings.Contains(parts[1], "Second paragraph") {
+		t.Errorf("wrapAndIndentParagraphs(...) second part = %q, expected it to hold the second paragraph", parts[1])
+	}
+}
+
+// TestWrapAndIndentParagraphsCollapsesEachParagraphsOwnLineBreaks -
+// This test verifies that a paragraph's own internal line break,
+// however its source YAML file happened to be typed, is treated as
+// just a word boundary and rewrapped cleanly, rather than being kept
+// as a forced break independent of the requested width.
+func TestWrapAndIndentParagraphsCollapsesEachParagraphsOwnLineBreaks(t *testing.T) {
+	body := "One two three\nfour five six seven eight nine ten eleven twelve."
+	got := wrapAndIndentParagraphs(body, "    ", minManPageWidth)
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+
+	for _, line := range lines {
+		if len(line) > minManPageWidth {
+			t.Errorf("wrapAndIndentParagraphs(...) line %q is %d columns wide, wider than width %d", line, len(line), minManPageWidth)
+		}
+	}
+	rejoined := strings.Join(strings.Fields(got), " ")
+	want := strings.Join(strings.Fields(body), " ")
+	if rejoined != want {
+		t.Errorf("wrapAndIndentParagraphs(...) words = %q, want %q, unchanged aside from rewrapping", rejoined, want)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// effectiveManPageWidth
+//
+// ----------------------------------------------------------------------
+
+// TestEffectiveManPageWidthFallsBackBelowTheFloor - This test verifies
+// that any width below minManPageWidth, including zero and a negative
+// value, resolves to defaultManPageWidth, and that minManPageWidth
+// itself, and anything above it, is returned unchanged.
+func TestEffectiveManPageWidthFallsBackBelowTheFloor(t *testing.T) {
+	for _, width := range []int{-10, -1, 0, minManPageWidth - 1} {
+		if got := effectiveManPageWidth(width); got != defaultManPageWidth {
+			t.Errorf("effectiveManPageWidth(%d) = %d, want defaultManPageWidth (%d)", width, got, defaultManPageWidth)
+		}
+	}
+	for _, width := range []int{minManPageWidth, minManPageWidth + 1, 80, 200} {
+		if got := effectiveManPageWidth(width); got != width {
+			t.Errorf("effectiveManPageWidth(%d) = %d, want %d unchanged", width, got, width)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------
+//
 // SortCommandNames
 //
 // ----------------------------------------------------------------------

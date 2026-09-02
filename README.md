@@ -916,13 +916,71 @@ alias's own literal name already gets as an ordinary word.
 
 Real Cisco and HP have no literal "help <command>" form of their own;
 extra help for one specific command comes from typing the command
-itself followed by `?`, `alias ?` for example. RouterCLI's own `help`
-command accepts an optional command name for exactly the same purpose,
-`help alias` printing precisely what `alias ?` already prints, useful
+itself followed by `?`, `alias ?` for example, and that stays exactly
+what `?` and Tab completion do here too for every ordinary command,
+unchanged, answering only "what can I type next." RouterCLI's own
+`help` command accepts an optional command name for a different, more
+detailed purpose, a real man page style description of that one
+command rather than the next keystroke's own hint. Its output opens
+with a header line in the classic, mirrored man page shape, the
+command's own name in all capitals at both the left and right margins
+with a centered title, `<ProductName> Help Information`, in between,
+`ProductName` a deployment's own configured display name, see
+`ProductName` in `etc/README.md`, `RouterCLI` itself by default. NAME,
+SYNOPSIS, DESCRIPTION, and SUBCOMMANDS sections follow, each only when
+that command actually has something for it to show. `help alias`
+prints a NAME section holding alias's own name and description, a
+SYNOPSIS section built from the same argument hint `?` would show,
+and, when that command declares a longer `help` entry of its own in
+the language file, a DESCRIPTION section holding that longer body as
+well, `alias` and `reload` both ship one, real examples of what a
+project built on this framework can add for its own commands. `help
+show`, a command with subcommands rather than arguments of its own,
+prints a SUBCOMMANDS section instead, one level deep, each entry's own
+name, description, and usage hint together on one line, useful
 anywhere the raw `?` keypress itself is inconvenient to send, a
-non-interactive pipe or a copied transcript for instance. `help` with
-nothing after it still lists every command available at the current
-Command Level, unchanged.
+non-interactive pipe or a copied transcript for instance. A name typed
+after `help` that matches more than one command lists the matching
+candidate names, with no header line, there being no one command to
+build one for; a name matching nothing at all is refused with an
+error rather than printing nothing silently. `help` with nothing after
+it still lists every command available at the current Command Level,
+unchanged.
+
+The NAME, SYNOPSIS, and DESCRIPTION sections wrap their own prose to
+the session's own terminal width, the same live width `show terminal`
+already reports, falling back to a classic eighty column default only
+when that width cannot actually be read, a piped or redirected
+session for instance. Every continuation line, not only a section's
+own first line, carries that section's own left margin, so a long
+DESCRIPTION paragraph reads as one properly indented block rather than
+its first line indented and the rest left for a real terminal's own
+dumb wrap to drop back at column zero. The SUBCOMMANDS section is
+different, its own column aligned name, description, and usage hint
+never rewrapped, so a narrow terminal cannot break its own alignment.
+A blank line opens the whole block, before the header, and one more
+closes it, after the last section's own content, so a detailed `help`
+answer never runs straight into the next prompt with no separation of
+its own. `help` is itself pageable, the same mechanism every `show`
+report style command already uses, so a block longer than one screen
+pauses with the classic `--More--` prompt instead of scrolling past
+the top of the terminal; see section 9 above for `terminal length` and
+`terminal width`, and for how a session's own paging preference is
+set.
+
+The one place `?` and Tab completion do treat `help` specially is
+`help`'s own argument. Typing a command name after `help` completes,
+and shows `?` help for, that name against the very same tree a bare,
+top-level Tab or `?` would, `help con` followed by Tab expanding to
+`help configure ` for instance, rather than being left alone as a
+plain, free-form argument with nothing to complete, since that
+argument always names another real command, never arbitrary text.
+This is the one deliberate exception; nothing else changes about how
+`?` and Tab completion answer "what can I type next" for every
+ordinary command's own real argument, and every command shipped in
+this project's own tree that takes one now documents it with a real
+`arghelp`, so `?` and Tab both have something to show rather than
+nothing.
 
 An alias applies to the running session right away and shows up in `show
 running-config` immediately, the same as any other configuration change,
