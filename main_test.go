@@ -20,6 +20,8 @@ import (
 	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/cmd/product"
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/daemon"
+	"github.com/gotermme/routercli/paging"
 )
 
 // TestPreventEscapeIgnoresEscapeSignals - This test sends the process
@@ -435,12 +437,23 @@ func TestLoadStartupConfigMissingFileIsNotAnError(t *testing.T) {
 // base, not left wherever replaying "enable" moved them.
 func TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition(t *testing.T) {
 	levels := startupConfigLevelsForLoad(t)
+	state := &product.ProductState{}
 	ctx := &command.AppContext{
-		State:    &product.ProductState{},
-		Session:  &auth.Session{CommandLevel: "base"},
-		Levels:   levels,
-		Logger:   log.New(io.Discard, "", 0),
-		Position: command.NewCommandLevelStack("base", "", levels.ByName["base"].Tree),
+		State: state,
+		// DaemonClient wraps the exact same *product.ProductState
+		// pointer State itself holds, the same pattern main.go's own
+		// real startup wiring uses, see the productState/daemonClient
+		// paragraph above ctx's own construction there, so replaying
+		// "hostname myrouter" below, which now reaches
+		// ctx.DaemonClient.MutateProductState rather than State
+		// directly, see cmd/product/cmd_hostname.go, mutates this
+		// identical object rather than panicking against a nil
+		// DaemonClient.
+		DaemonClient: daemon.NewStandaloneClient(daemon.NewState(state, nil, nil, nil, nil)),
+		Session:      &auth.Session{CommandLevel: "base"},
+		Levels:       levels,
+		Logger:       log.New(io.Discard, "", 0),
+		Position:     command.NewCommandLevelStack("base", "", levels.ByName["base"].Tree),
 	}
 	path := filepath.Join(t.TempDir(), "startup-config")
 	if err := os.WriteFile(path, []byte("enable\nhostname myrouter\n"), 0640); err != nil {
@@ -451,7 +464,6 @@ func TestLoadStartupConfigAppliesSavedConfigurationAndResetsPosition(t *testing.
 		t.Fatalf("command.LoadStartupConfig returned unexpected error: %v", err)
 	}
 
-	state := ctx.State.(*product.ProductState)
 	if state.Hostname != "myrouter" {
 		t.Errorf("replayed Hostname = %q, want %q", state.Hostname, "myrouter")
 	}
@@ -686,6 +698,73 @@ func TestPrintOutputHeaderIncludesBuildWhenSet(t *testing.T) {
 	out := captureStdout(t, printOutputHeader)
 	if !strings.Contains(out, "test-build-123") {
 		t.Errorf("printOutputHeader output = %q, expected it to contain the Build string %q", out, "test-build-123")
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// printBanner
+//
+// ----------------------------------------------------------------------
+
+// TestPrintBannerPrintsNonEmptyTextWithATrailingNewline - This test
+// verifies that printBanner, given a non-empty string, prints it
+// verbatim, with the one trailing newline fmt.Println always adds and
+// nothing else, matching its own doc comment: "no added formatting
+// beyond its own trailing newline."
+func TestPrintBannerPrintsNonEmptyTextWithATrailingNewline(t *testing.T) {
+	out := captureStdout(t, func() { printBanner("Unauthorized access is prohibited.") })
+	if out != "Unauthorized access is prohibited.\n" {
+		t.Errorf("printBanner output = %q, want %q", out, "Unauthorized access is prohibited.\n")
+	}
+}
+
+// TestPrintBannerPrintsNothingForEmptyText - This test verifies that
+// printBanner prints nothing at all, not even a blank line, when text
+// is empty, the default, unset state every banner starts in, matching
+// its own doc comment's claim that neither call site needs its own
+// separate empty check. A stray blank line here would show up as an
+// unwanted empty line at every login and every "enable" prompt on a
+// deployment that never configured a banner.
+func TestPrintBannerPrintsNothingForEmptyText(t *testing.T) {
+	out := captureStdout(t, func() { printBanner("") })
+	if out != "" {
+		t.Errorf("printBanner(\"\") printed %q, want no output at all", out)
+	}
+}
+
+// ----------------------------------------------------------------------
+//
+// filterModeFromConfig
+//
+// ----------------------------------------------------------------------
+
+// TestFilterModeFromConfigMapsRegexToFilterModeRegex - This test
+// verifies that the one recognized non-default value, "regex", maps to
+// paging.FilterModeRegex, the exact string
+// config.SystemConfig.FilterMatchMode's own validation accepts
+// alongside "substring".
+func TestFilterModeFromConfigMapsRegexToFilterModeRegex(t *testing.T) {
+	if got := filterModeFromConfig("regex"); got != paging.FilterModeRegex {
+		t.Errorf("filterModeFromConfig(\"regex\") = %v, want paging.FilterModeRegex", got)
+	}
+}
+
+// TestFilterModeFromConfigMapsEverythingElseToFilterModeSubstring -
+// This test verifies that "substring", the empty string, and an
+// arbitrary unrecognized value all map to paging.FilterModeSubstring,
+// the documented default this function falls back to for anything
+// that is not exactly "regex". config.LoadSystemConfig's own
+// validation is what actually keeps a real, loaded configuration from
+// ever reaching this function with anything other than "substring" or
+// "regex", not this function itself, so the fallback is checked
+// against more than just "substring" here to confirm it really is an
+// unconditional default, not a second exact match.
+func TestFilterModeFromConfigMapsEverythingElseToFilterModeSubstring(t *testing.T) {
+	for _, mode := range []string{"substring", "", "bogus"} {
+		if got := filterModeFromConfig(mode); got != paging.FilterModeSubstring {
+			t.Errorf("filterModeFromConfig(%q) = %v, want paging.FilterModeSubstring", mode, got)
+		}
 	}
 }
 

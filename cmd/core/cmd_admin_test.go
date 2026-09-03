@@ -7,13 +7,16 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/i18n"
 	"github.com/gotermme/routercli/paging"
 )
 
@@ -53,6 +56,13 @@ func newAdminTestContext(t *testing.T, username string, u *auth.User) *command.A
 	ctx.Roles = RolesFixture()
 	ctx.DefaultsDir = t.TempDir()
 	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config-does-not-exist")
+	// rewireDaemonClient shares this exact Users map, and Roles struct,
+	// with ctx.DaemonClient's own Store, so a handler migrated to
+	// MutateUsers, "account create" and "account delete" among them,
+	// sees and modifies the same ctx.Users a test asserts against
+	// afterward. See rewireDaemonClient's own doc comment in
+	// testhelpers_test.go.
+	rewireDaemonClient(ctx)
 	return ctx
 }
 
@@ -540,6 +550,48 @@ func TestRunReloadEndsTheConnection(t *testing.T) {
 	}
 }
 
+// TestRunReloadWithRealDaemonAsksTheDaemonToRebootInstead - This test
+// verifies that "reload", with no args and not negated, asks
+// ctx.DaemonClient.Reboot rather than doing today's standalone reread
+// itself, once a fakeDaemonClient stands in for a real daemon
+// connection, and returns nil rather than command.ErrQuit, since this
+// session's own ending now arrives asynchronously through its own
+// FarewellChannel instead, see runReboot's own doc comment. ctx.Users
+// is left untouched, confirming this path genuinely skipped
+// reloadFromDisk rather than merely happening to also succeed at it.
+func TestRunReloadWithRealDaemonAsksTheDaemonToRebootInstead(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	fake := &fakeDaemonClient{}
+	ctx.DaemonClient = fake
+	before := ctx.Users["admin"]
+
+	if err := runReload(ctx, nil); err != nil {
+		t.Fatalf("runReload returned %v, want nil", err)
+	}
+	if fake.RebootCalls != 1 {
+		t.Errorf("DaemonClient.Reboot was called %d times, want 1", fake.RebootCalls)
+	}
+	if ctx.Users["admin"] != before {
+		t.Error("expected ctx.Users to be left untouched, reloadFromDisk should not have run")
+	}
+}
+
+// TestRunReloadWithRealDaemonRebootFailurePropagatesTheError - This
+// test verifies that a genuine failure reported by
+// ctx.DaemonClient.Reboot, anything other than
+// command.ErrDaemonNotConfigured, is reported back to whoever typed
+// "reload" or "reboot" rather than silently falling back to the
+// standalone reread path, which would hide a real daemon side failure
+// behind an apparently successful local reload.
+func TestRunReloadWithRealDaemonRebootFailurePropagatesTheError(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	ctx.DaemonClient = &fakeDaemonClient{RebootErr: errors.New("daemon: reread failed")}
+
+	if err := runReload(ctx, nil); err == nil {
+		t.Fatal("expected runReload to return an error when the daemon's own Reboot call fails")
+	}
+}
+
 // TestRunReloadWithDelaySchedulesRatherThanEndingTheConnection - This
 // test verifies that "reload <seconds>" arms ctx.ReloadScheduler and
 // returns nil, rather than reloading immediately, leaving the current
@@ -716,5 +768,81 @@ func TestGeneratePasswordNeverExceedsMaxPasswordLength(t *testing.T) {
 	}
 	if len(password) > auth.MaxPasswordLength {
 		t.Errorf("generated password length %d, want at most %d", len(password), auth.MaxPasswordLength)
+	}
+}
+
+// ----------------------------------------------------------------------
+// disconnect user
+// ----------------------------------------------------------------------
+
+// TestRunDisconnectUserNoDaemonReportsClearMessage - This test
+// verifies that "disconnect user", run against the plain
+// daemon.NewStandaloneClient newTestContext already provides, no real
+// daemon configured, reports a clear, disconnect-specific message
+// rather than the generic failure text every other daemon call gets.
+// This exercises the defense-in-depth path only, since a real
+// deployment with no daemon configured has this command pruned out of
+// its own tree entirely, see main.go's own featureFlags.
+func TestRunDisconnectUserNoDaemonReportsClearMessage(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+
+	err := runDisconnectUser(ctx, []string{"alice"})
+	if err == nil {
+		t.Fatal("expected runDisconnectUser to fail with no daemon configured")
+	}
+	if err.Error() != "[[disconnect.user.not_supported]]" {
+		t.Errorf("error = %q, want the not_supported message", err.Error())
+	}
+}
+
+// TestRunDisconnectUserSuccessPassesUsernameAndSessionID - This test
+// verifies that "disconnect user <username> <session-id>" passes both
+// arguments through to ctx.DaemonClient.DisconnectUser exactly, and
+// that a bare "disconnect user <username>" passes an empty session ID
+// through, "the one session belonging to username," see
+// command.DaemonClient.DisconnectUser's own doc comment.
+func TestRunDisconnectUserSuccessPassesUsernameAndSessionID(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	fake := &fakeDaemonClient{}
+	ctx.DaemonClient = fake
+
+	if err := runDisconnectUser(ctx, []string{"alice", "s1"}); err != nil {
+		t.Fatalf("runDisconnectUser returned unexpected error: %v", err)
+	}
+	if fake.DisconnectUserUsername != "alice" || fake.DisconnectUserSessionID != "s1" {
+		t.Errorf("DisconnectUser called with (%q, %q), want (\"alice\", \"s1\")", fake.DisconnectUserUsername, fake.DisconnectUserSessionID)
+	}
+
+	if err := runDisconnectUser(ctx, []string{"bob"}); err != nil {
+		t.Fatalf("runDisconnectUser returned unexpected error: %v", err)
+	}
+	if fake.DisconnectUserUsername != "bob" || fake.DisconnectUserSessionID != "" {
+		t.Errorf("DisconnectUser called with (%q, %q), want (\"bob\", \"\")", fake.DisconnectUserUsername, fake.DisconnectUserSessionID)
+	}
+}
+
+// TestRunDisconnectUserAmbiguousPropagatesTheDaemonsOwnErrorText -
+// This test verifies that an ambiguous session error the daemon
+// itself already formatted, candidate session IDs included, see
+// daemon.Server.disconnectErrorText, reaches whoever typed the
+// command unchanged rather than being replaced by a generic message.
+func TestRunDisconnectUserAmbiguousPropagatesTheDaemonsOwnErrorText(t *testing.T) {
+	ctx := newAdminTestContext(t, "admin", &auth.User{Username: "admin", Roles: []string{"admin"}})
+	// T() on a nil Translator, newAdminTestContext's default, drops
+	// any format args rather than applying them, see
+	// i18n.Translator.T's own doc comment, so a real Translator with a
+	// minimal catalog is needed here to actually see the daemon's own
+	// error text interpolated into the returned message.
+	ctx.Translator = i18n.New(map[string]i18n.Catalog{
+		"en": {"disconnect.user.failed": "Failed to disconnect user: %s"},
+	}, "en", "en")
+	ctx.DaemonClient = &fakeDaemonClient{DisconnectUserErr: errors.New(`more than one session for "alice", specify a session ID: s1, s2`)}
+
+	err := runDisconnectUser(ctx, []string{"alice"})
+	if err == nil {
+		t.Fatal("expected runDisconnectUser to fail on an ambiguous session")
+	}
+	if !strings.Contains(err.Error(), "s1, s2") {
+		t.Errorf("error = %q, want it to name the candidate session IDs", err.Error())
 	}
 }

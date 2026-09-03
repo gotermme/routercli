@@ -43,6 +43,12 @@ func newAliasTestContext(currentLevel string) *command.AppContext {
 	}
 	level := ctx.Levels.ByName[currentLevel]
 	ctx.Position = command.NewCommandLevelStack(level.Name, "", level.Tree)
+	// rewireDaemonClient shares this exact TreeStructure with
+	// ctx.DaemonClient's own Store, so cmd_alias.go's own
+	// ctx.DaemonClient.MutateLevels call sees, and modifies, the same
+	// ctx.Levels a test asserts against afterward. See
+	// rewireDaemonClient's own doc comment in testhelpers_test.go.
+	rewireDaemonClient(ctx)
 	return ctx
 }
 

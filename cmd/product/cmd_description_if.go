@@ -29,24 +29,36 @@ import (
 // accepted and simply ignored rather than treated as an error. Real
 // Cisco is similarly lenient about trailing tokens after "no" that do
 // not change the outcome.
+//
+// This handler reaches ProductState through
+// ctx.DaemonClient.MutateProductState rather than a direct type
+// assertion on ctx.State, following cmd_hostname.go's own "hostname"
+// handler; see that file's own doc comment for the full reasoning.
+// ifaceName itself, read from ctx.Position, is session-local, not
+// shared state, so it is resolved once, outside the closure.
 func init() {
 	command.Register("description.interface", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
 		ifaceName := ctx.Position.Current().Context.(string)
-		iface := state.Interface(ifaceName)
 
-		if ctx.Negated {
-			iface.Description = ""
-			ctx.Logger.Debugln("DEBUG: description cleared for interface", ifaceName)
-			fmt.Println(ctx.Translator.T("description_if.cleared"))
-			return nil
-		}
+		_, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+			state := productState.(*ProductState)
+			iface := state.Interface(ifaceName)
 
-		// MinArgs/MaxArgs (both 1) are enforced by the framework for the
-		// non-negated path, so args[0] is guaranteed to exist here.
-		iface.Description = args[0]
-		ctx.Logger.Debugln("DEBUG: description set for interface", ifaceName)
-		fmt.Println(ctx.Translator.T("description_if.confirm"))
-		return nil
+			if ctx.Negated {
+				iface.Description = ""
+				ctx.Logger.Debugln("DEBUG: description cleared for interface", ifaceName)
+				fmt.Println(ctx.Translator.T("description_if.cleared"))
+				return nil, nil
+			}
+
+			// MinArgs/MaxArgs (both 1) are enforced by the framework for
+			// the non-negated path, so args[0] is guaranteed to exist
+			// here.
+			iface.Description = args[0]
+			ctx.Logger.Debugln("DEBUG: description set for interface", ifaceName)
+			fmt.Println(ctx.Translator.T("description_if.confirm"))
+			return nil, nil
+		})
+		return err
 	})
 }

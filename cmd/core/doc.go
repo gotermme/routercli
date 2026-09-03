@@ -8,13 +8,16 @@ Package core implements a set of command handlers broadly useful to
 almost any project built on routercli, not tied to any one vendor's
 command set or any one project's own application state. Login and
 session management, elevating a session to a more privileged Command
-Level, moving into and back out of a configuration mode, terminal
-paging and output filtering settings, and password and TOTP self
-service all fall into this category. See package product, in
-cmd/product, for the separate, openly optional set of Cisco and HP
-flavored demonstration commands, hostname, interface configuration,
-and show running-config among them, built on top of what this package
-provides.
+Level, moving into and back out of a configuration mode, and password
+and TOTP self service all fall into this category. See package
+product, in cmd/product, for the separate, openly optional set of
+Cisco and HP flavored demonstration commands, hostname, interface
+configuration, and show running-config among them, built on top of
+what this package provides, and package session, in cmd/session, for
+terminal paging and output filtering settings and the other handlers
+genuinely local to one connection, carved out of this package once
+claude/DAEMON_ARCHITECTURE_DESIGN.md gave that distinction its own
+real meaning; see that package's own doc comment for the boundary.
 
 Nothing in this package requires package product, and nothing in
 package product is required by this package. main.go wires both in
@@ -102,14 +105,79 @@ itself should have made unreachable.
 ctx.State is declared as any in package command, because package
 command has no idea what a project built on this framework will
 actually want to track, nor should it. No handler in this package
-touches ctx.State at all; everything here operates only on the
-framework level values already listed under The Handler Signature
-above, terminal geometry, filter mode, the current Command Level, the
-logged in Session's own user record, and so on, precisely so this
-package stays useful to a project whose own application state looks
-nothing like package product's ProductState. A project defining its
-own state type follows package product's own lead, see that package's
-model.go, not anything in this one.
+touches ctx.State at all; everything here operates on the framework
+level values already listed under The Handler Signature above,
+terminal geometry, filter mode, the current Command Level, and so on,
+precisely so this package stays useful to a project whose own
+application state looks nothing like package product's ProductState. A
+project defining its own state type follows package product's own
+lead, see that package's model.go, not anything in this one, and see
+that package's own Application State section for the ctx.DaemonClient
+pattern a project follows for its own such state.
+
+This package does, though, hold every handler in this project that
+mutates the other three pieces of shared, potentially daemon-backed
+state command.DaemonClient exposes: ctx.Levels, a Command Level's own
+runtime defined aliases, cmd_alias.go's "alias", and its own
+PasswordHash, cmd_password_manager.go's "password manager" and
+"password manager hash"; ctx.Users, the user database, cmd_admin.go's
+account management commands, cmd_password.go's "password change", and
+cmd_totp.go's totp enable and totp disable; and, though no handler in
+this project happens to need it yet, ctx.Roles, the declared role set,
+through the same MutateRoles method. Each is reached through its own
+ctx.DaemonClient method, MutateLevels, MutateUsers, or MutateRoles,
+never through ctx.Levels, ctx.Users, or ctx.Roles directly for a
+write, the same reasoning, and the same three rules, package product's
+own Application State section gives for ctx.DaemonClient.MutateProductState;
+see that section first for the pattern in full, since it is not
+repeated here.
+
+cmd_admin.go's "account create" is a representative worked example for
+ctx.Users:
+
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+	        users[username] = &auth.User{
+	                Username:     username,
+	                PasswordHash: hash,
+	        }
+	        return nil, nil
+	}); err != nil {
+	        return err
+	}
+
+auth.Users is a plain map, map[string]*auth.User, so an ordinary add,
+delete, or per-user field mutation inside this closure works exactly
+the way it would against ctx.Users directly, provided it resolves its
+own working map from the closure's own users parameter, never from a
+map or *auth.User pointer read or captured before the closure ran, the
+same discipline package product's own Application State section
+describes for a *ProductState pointer. cmd_admin.go's "account roles
+add" and "account roles remove" are worked examples of mutating one
+field on an existing *auth.User this way, re-resolved by username
+inside the closure rather than reusing a pointer read beforehand;
+cmd_password_manager.go's two handlers are the equivalent worked
+example for ctx.Levels, re-resolving a *command.CommandLevel by name
+the same way.
+
+A wholesale replacement of the entire map or struct, "erase users"
+restoring every account from ctx.DefaultsDir's own skeleton file being
+the one case in this package that needs it, does not fit this
+incremental, per-entry closure shape. cmd_admin.go's runEraseUsers is
+the worked example: it clears the existing map with the clear builtin,
+then repopulates it entry by entry from a freshly loaded one, inside
+one MutateUsers call, so the map object itself, and therefore its
+identity everywhere else that already holds a reference to it, never
+changes, only its contents. See that function's own doc comment for
+why a direct reassignment, ctx.Users = freshlyLoaded, is not safe here
+the way it still is in cmd_admin.go's own reloadFromDisk, whose own
+doc comment explains that difference in turn.
+
+Every read of ctx.Levels, ctx.Users, or ctx.Roles in this package, by
+contrast, stays a direct field access, currentUser and
+currentUserSettableLevel among the worked examples, never routed
+through ctx.DaemonClient: that interface exposes only Mutate methods,
+no Read method of any kind, itself the evidence that reads were never
+meant to go through it at all.
 
 # Negation
 
@@ -245,10 +313,13 @@ totp enable on its own shows only the plain, manually typed secret;
 totp enable qr additionally shows a scannable QR code. Both share one
 interactive body, runTOTPEnable, differing only in which of
 printTOTPSecret or printTOTPEnrollmentQR is called first. These
-commands update a User's TOTPSecret and persist that change with
-auth.SaveUsers, rather than only holding it in memory for the rest of
-this one session, so enrolling or removing a second factor never
-requires stopping the program.
+commands update a User's TOTPSecret in memory, through
+ctx.DaemonClient.MutateUsers, see Application State above, the same
+"nothing survives a restart without an explicit save" design every
+other piece of shared state in this project follows; a session must
+run "write memory" separately for an enrolled or removed second
+factor to survive a reload or restart, see finishTOTPEnable's own doc
+comment.
 
 Every handler here splits its interactive, terminal-reading half from
 its verify-and-save half, finishTOTPEnable and finishTOTPDisable, the

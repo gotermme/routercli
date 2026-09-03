@@ -231,6 +231,15 @@ func verifyReauth(provider auth.AuthProvider, user *auth.User, password, code st
 // process that reloads or restarts before that happens goes right
 // back to whatever password ctx.UsersFile last held.
 //
+// This write reaches the user database through
+// ctx.DaemonClient.MutateUsers rather than mutating the user pointer
+// this function was handed directly, re-resolving it from the
+// closure's own users parameter by ctx.Session.Username, the same
+// discipline cmd_hostname.go's own "hostname" handler already
+// follows. Every check above this point, the mismatch, policy, and
+// same-as-current checks, stays a plain read against the user pointer
+// already in hand, changing nothing about how those are decided.
+//
 // The returned bool tells runPasswordChange whether the change
 // actually completed, the same reason finishTOTPEnable and
 // finishTOTPDisable each return one of their own.
@@ -255,12 +264,19 @@ func finishPasswordChange(ctx *command.AppContext, user *auth.User, newPassword,
 		return false, err
 	}
 
-	user.PasswordHash = hash
-	// A successful change, forced or voluntary, always clears a
-	// pending forced-change flag, see User.MustChangePassword's own
-	// doc comment. This account has just proven a real password of
-	// its own choosing, so there is nothing left to force.
-	user.MustChangePassword = false
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		target := users[ctx.Session.Username]
+		target.PasswordHash = hash
+		// A successful change, forced or voluntary, always clears a
+		// pending forced-change flag, see User.MustChangePassword's
+		// own doc comment. This account has just proven a real
+		// password of its own choosing, so there is nothing left to
+		// force.
+		target.MustChangePassword = false
+		return nil, nil
+	}); err != nil {
+		return false, err
+	}
 	// This only ever changes user.PasswordHash and
 	// user.MustChangePassword, in memory, never ctx.UsersFile on disk.
 	// See design-goals.md's own "nothing survives a restart without an

@@ -535,6 +535,21 @@ type AppContext struct {
 	TOTPIssuer        string
 	TOTPMaxAttempts   int
 
+	// DaemonClient is the small interface a handler that touches
+	// shared canonical state calls into instead of reading or writing
+	// State or Levels directly; see DaemonClient's own doc comment in
+	// daemonclient.go for the full reasoning and
+	// claude/DAEMON_ARCHITECTURE_DESIGN.md for the design this
+	// implements. A deployment with no daemon configured,
+	// config.SystemConfig.DaemonSocketPath empty, is still given a
+	// real DaemonClient, daemon.NewStandaloneClient wrapping the exact
+	// same State and Levels values this AppContext already holds, so a
+	// migrated handler's own behavior is unchanged in that mode; only
+	// an AppContext a test builds by hand without wiring one leaves
+	// this nil, and a handler that has been migrated to DaemonClient
+	// must not be exercised against such an AppContext.
+	DaemonClient DaemonClient
+
 	PasswordPolicy            auth.PasswordPolicy
 	PasswordChangeMaxAttempts int
 	AuthProvider              auth.AuthProvider

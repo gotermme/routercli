@@ -24,9 +24,11 @@ import (
 	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/cmd/core"
 	"github.com/gotermme/routercli/cmd/product"
+	_ "github.com/gotermme/routercli/cmd/session"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/completer"
 	"github.com/gotermme/routercli/config"
+	"github.com/gotermme/routercli/daemon"
 	"github.com/gotermme/routercli/i18n"
 	"github.com/gotermme/routercli/paging"
 	"github.com/gotermme/routercli/tokenize"
@@ -144,6 +146,14 @@ func main() {
 	featureFlags := map[string]bool{
 		"totp":            config.EnableTOTPAuthentication,
 		"password_change": config.EnableCLIAuthentication,
+		// "daemon" gates "show users" and "disconnect user", both
+		// meaningless with no real daemon configured, an empty
+		// DaemonSocketPath being the whole reason StandaloneClient's
+		// own ListUsers, DisconnectUser, Reboot, and FarewellChannel
+		// all return ErrDaemonNotConfigured rather than doing
+		// something halfway; see that error's own doc comment in
+		// command/daemonclient.go.
+		"daemon": config.DaemonSocketPath != "",
 	}
 	for _, level := range levels.Order {
 		if err := command.PruneDisabledCommands(level.Tree, featureFlags, ""); err != nil {
@@ -223,8 +233,23 @@ func main() {
 		os.Exit(0)
 	}
 
+	// The local *auditlog.AuditLog built here is only ever actually
+	// opened, config.AuditLogEnabled honored, when this deployment has
+	// no daemon configured, config.DaemonSocketPath empty. Once a real
+	// daemon is configured, further down, ctx.Audit is reassigned to
+	// this session's own RemoteClient instead, which sends every
+	// dispatched command to the daemon as a AuditEvent message rather
+	// than writing AuditLogFile itself; see
+	// claude/DAEMON_ARCHITECTURE_DESIGN.md's own "Daemon owned audit
+	// logging" section: "When no daemon is configured, standalone
+	// mode, the CLI keeps writing to AuditLogFile directly exactly as
+	// it does today... rather than every CLI process opening and
+	// appending to that file independently." This local audit is left
+	// constructed either way, never nil, so ctx.Audit always has a
+	// real value to start from, and so defer audit.Close() below stays
+	// unconditional and harmless even when it was never opened.
 	audit := auditlog.New(config.AuditLogFile, logger)
-	if config.AuditLogEnabled {
+	if config.AuditLogEnabled && config.DaemonSocketPath == "" {
 		if err := mkdirForFile(config.AuditLogFile); err != nil {
 			fmt.Fprintln(os.Stderr, "failed to prepare audit log directory:", err)
 			os.Exit(1)
@@ -253,13 +278,50 @@ func main() {
 	session := auth.NewSession()
 	session.CommandLevel = base.Name
 
+	// users is loaded here, ahead of its own AuthRequired block further
+	// down, specifically so daemonClient's own Store, built right below,
+	// starts out sharing the exact same auth.Users map ctx.Users is
+	// about to be set to further down, rather than a permanently nil,
+	// disconnected copy. Several handlers, cmd/core/cmd_admin.go's
+	// account management commands among them, call
+	// ctx.DaemonClient.MutateUsers, and that closure must see this
+	// deployment's real user database, not nil, even when AuthRequired
+	// is false and no login prompt ever runs. users stays nil, its own
+	// zero value, exactly when AuthRequired is false, matching what
+	// ctx.Users itself is left as further down in that same case.
+	var users auth.Users
+	if config.AuthRequired {
+		loaded, err := auth.LoadUsers(config.UsersFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to load users file:", err)
+			os.Exit(1)
+		}
+		users = loaded
+	}
+
+	// productState and daemonClient exist as separate local variables,
+	// rather than being built inline inside the AppContext literal
+	// below, so daemonClient can be closed with defer right here,
+	// alongside every other startup resource this function already
+	// closes that way, audit above and histFile further down. Roles
+	// needs no equivalent hoist to users above, since it is already
+	// loaded once, earlier in this function, and shared by both
+	// daemonClient here and ctx.Roles below with no separate
+	// AuthRequired branch of its own. See
+	// claude/DAEMON_ARCHITECTURE_DESIGN.md and command.DaemonClient's
+	// own doc comment for the design this implements.
+	productState := &product.ProductState{}
+	daemonClient := daemon.NewStandaloneClient(daemon.NewState(productState, levels, users, roles, nil))
+	defer daemonClient.Close()
+
 	ctx := &command.AppContext{
-		State:      &product.ProductState{},
-		Logger:     logger,
-		Levels:     levels,
-		Roles:      roles,
-		Audit:      audit,
-		Translator: translator,
+		State:        productState,
+		DaemonClient: daemonClient,
+		Logger:       logger,
+		Levels:       levels,
+		Roles:        roles,
+		Audit:        audit,
+		Translator:   translator,
 		// Seeded from the base level's own Name, PromptSuffix, and
 		// Tree, never a hardcoded literal, so anything comparing
 		// against the current root Command Level's name always matches
@@ -396,11 +458,10 @@ func main() {
 	}
 
 	if config.AuthRequired {
-		users, err := auth.LoadUsers(config.UsersFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "failed to load users file:", err)
-			os.Exit(1)
-		}
+		// users itself was already loaded above, ahead of daemonClient's
+		// own construction; ctx.Users is set to that exact same map
+		// here, rather than a second, freshly loaded one, so ctx.Users
+		// and daemonClient's own Store never diverge.
 		ctx.Users = users
 		ctx.UsersFile = config.UsersFile
 		ctx.TOTPIssuer = config.TOTPIssuer
@@ -483,6 +544,84 @@ func main() {
 		}
 	}
 
+	// --------------------------------------------------
+	// Dial a real daemon, when this deployment is configured for one
+	// --------------------------------------------------
+	//
+	// This runs after ctx.Session has its final value, Username
+	// included, so this session's own Hello carries a real, already
+	// authenticated username, matching
+	// claude/DAEMON_ARCHITECTURE_DESIGN.md's own "Hello, sent once,
+	// right after the handshake completes: the connecting session's
+	// own username, once locally authenticated" wording exactly. A
+	// deployment with config.DaemonSocketPath left empty, the default,
+	// leaves ctx.DaemonClient and ctx.Audit exactly as they already
+	// are, daemonClient and audit, both already assigned above; this
+	// project's entire standalone behavior is unchanged.
+	//
+	// ctx.DaemonClient becomes a daemon.ConnectedClient here, still
+	// backed by the very same daemonClient, a *daemon.StandaloneClient,
+	// for the four Mutate methods, ProductState and the rest genuinely
+	// still living only in this one CLI process's own memory, a known,
+	// disclosed limitation this phase does not close, see
+	// ConnectedClient's own doc comment, layered together with a real
+	// remoteClient, genuinely wired across a real socket, for
+	// ListUsers, DisconnectUser, Reboot, and FarewellChannel.
+	// ctx.Audit is reassigned to that same remoteClient, satisfying
+	// command.Auditor directly, so every ctx.Audit.Log and
+	// ctx.Audit.ForceLog call already scattered through runLoop below,
+	// unchanged by this, now sends the daemon a AuditEvent message
+	// instead of writing to a local file, exactly the "Daemon owned
+	// audit logging" section calls for.
+	//
+	// A terminal identifier, whatever "show users" prints as one
+	// session's own "terminal" column, has no single portable source
+	// in Go; SSH_TTY, set by sshd for an interactive shell, is used
+	// when present, since that is by far the most common way a real
+	// deployment's own CLI sessions arrive, and a plain "-" otherwise,
+	// the same placeholder real Cisco and HP gear itself falls back to
+	// for a session with no real tty of its own to report.
+	var remoteClient *daemon.RemoteClient
+	if config.DaemonSocketPath != "" {
+		publicKeyPath := daemon.StaticKeyPath(config.DaemonSocketPath) + ".pub"
+		daemonPublicKey, err := daemon.ReadStaticPublicKey(publicKeyPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to read the routercli-daemon's own static public key:", err)
+			os.Exit(1)
+		}
+		ch, conn, err := daemon.Dial(config.DaemonSocketPath, daemonPublicKey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to connect to routercli-daemon:", err)
+			os.Exit(1)
+		}
+		terminal := os.Getenv("SSH_TTY")
+		if terminal == "" {
+			terminal = "-"
+		}
+		remoteClient, err = daemon.NewRemoteClient(ch, conn, ctx.Session.Username, terminal)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to establish a session with routercli-daemon:", err)
+			os.Exit(1)
+		}
+		defer remoteClient.Close()
+		ctx.DaemonClient = daemon.NewConnectedClient(daemonClient, remoteClient)
+		ctx.Audit = remoteClient
+		remoteClient.SetLevel(ctx.Session.CommandLevel)
+		// config.AuditLogEnabled governs remoteClient's own Enable
+		// exactly the same way it already governs the local audit
+		// variable's own Enable a few dozen lines above, standalone
+		// mode's own untouched behavior; see RemoteClient.Enable's own
+		// doc comment for why this can never itself fail, no file of
+		// its own to open. "audit-log enable" and "audit-log disable",
+		// cmd/core/cmd_audit.go, still work exactly as before against
+		// this same ctx.Audit afterward, toggling this at any point
+		// during the session; only this one, startup time default
+		// changes with a daemon configured.
+		if config.AuditLogEnabled {
+			_ = remoteClient.Enable()
+		}
+	}
+
 	// The SESSION START audit entry is written unconditionally here,
 	// after ctx.Session has its final value either way, regardless of
 	// whether config.AuthRequired is even on, so every connection to
@@ -495,12 +634,15 @@ func main() {
 	// off. See runLoop's own SESSION END logging for the other half of
 	// this pair, and Session.HostUsername's own doc comment for why
 	// that, and HostConnectedAt, are folded into this one entry's own
-	// command text rather than becoming a new Auditor column.
+	// command text rather than becoming a new Auditor column. This
+	// goes through ctx.Audit, not the local audit variable directly,
+	// so a session connected to a real daemon reports its own start to
+	// the daemon, the same as every other command it dispatches.
 	sessionStartText := "SESSION START"
 	if ctx.Session.HostUsername != "" {
 		sessionStartText = fmt.Sprintf("SESSION START (host account %q connected at %s)", ctx.Session.HostUsername, ctx.Session.HostConnectedAt.Format(time.RFC3339))
 	}
-	audit.ForceLog(ctx.Session.Username, sessionStartText, true)
+	ctx.Audit.ForceLog(ctx.Session.Username, sessionStartText, true)
 
 	histFile := config.HistoryFile
 	if histFile == "" {
@@ -555,6 +697,7 @@ func main() {
 
 	treeListener := completer.New(ctx.Position, rl, logger, ctx.Translator, ctx.ListOptions)
 	treeListener.SetPrompt(buildPrompt(ctx))
+	treeListener.SetTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth, ctx.DefaultTerminalWidth)
 	rl.Config.Listener = treeListener
 
 	// Captured independently of readline so the idle timeout path can
@@ -569,12 +712,18 @@ func main() {
 	stopResizeWatch := watchTerminalResize(ctx, termFD)
 	defer stopResizeWatch()
 
+	var farewellCh <-chan string
+	if remoteClient != nil {
+		farewellCh = remoteClient.FarewellChannel()
+	}
 	runLoop(rl, treeListener, ctx, runLoopOptions{
 		PreventEscape:      config.PreventEscape,
 		SessionIdleTimeout: config.SessionIdleTimeout.AsDuration(),
 		ElevationTimeout:   config.ElevationTimeout.AsDuration(),
 		TerminalFD:         termFD,
 		OrigTerminalState:  origTermState,
+		FarewellChannel:    farewellCh,
+		RemoteClient:       remoteClient,
 	})
 } // main()
 
@@ -901,6 +1050,25 @@ type runLoopOptions struct {
 	// meaningful to restore.
 	TerminalFD        int
 	OrigTerminalState *term.State
+	// FarewellChannel receives exactly one push, the human readable
+	// reason text, the moment a connected daemon ends this session on
+	// purpose, "disconnect user" or "reboot" elsewhere having targeted
+	// it, or the connection to the daemon is lost with no explicit
+	// farewell at all; see command.DaemonClient.FarewellChannel's own
+	// doc comment. Left nil whenever this deployment has no daemon
+	// configured, the same nil channel convention idleCh and
+	// reloadFireCh below already establish for "not wired up in this
+	// session," so the select below simply never chooses this case.
+	FarewellChannel <-chan string
+	// RemoteClient, when non-nil, is this session's own live
+	// connection to a real daemon. The only thing runLoop itself uses
+	// it for is SetLevel, called every time ctx.Session.CommandLevel
+	// changes, so a connected daemon's own "show users" always reports
+	// this session's own current Command Level rather than whatever it
+	// was the moment this session first connected; see
+	// daemon.RemoteClient.SetLevel's own doc comment. Left nil
+	// whenever this deployment has no daemon configured.
+	RemoteClient *daemon.RemoteClient
 }
 
 func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *command.AppContext, opts runLoopOptions) {
@@ -987,6 +1155,27 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 					_ = term.Restore(opts.TerminalFD, opts.OrigTerminalState)
 				}
 				os.Exit(0)
+			case text := <-opts.FarewellChannel:
+				// A connected daemon just ended this session on
+				// purpose, "disconnect user" or "reboot" elsewhere
+				// having targeted it, or this session's own connection
+				// to the daemon was lost outright; either way, text is
+				// already the full, human readable reason, see
+				// command.DaemonClient.FarewellChannel's own doc
+				// comment, printed here exactly as received rather
+				// than wrapped in a further "%" prefixed message of
+				// this project's own. This ends the connection the
+				// same direct way the idle timeout and reload fired
+				// branches just above do, for the same reason: the
+				// goroutine reading rl.Readline() above may still be
+				// blocked waiting on real terminal input right now,
+				// with no portable way to cancel it.
+				fmt.Println(text)
+				logSessionEnd(ctx)
+				if opts.OrigTerminalState != nil {
+					_ = term.Restore(opts.TerminalFD, opts.OrigTerminalState)
+				}
+				os.Exit(0)
 			}
 		}
 
@@ -1019,6 +1208,9 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				base := ctx.Levels.Base()
 				ctx.Session.CommandLevel = base.Name
 				ctx.Position.SetRootTree(base.Name, base.PromptSuffix, base.Tree)
+				if opts.RemoteClient != nil {
+					opts.RemoteClient.SetLevel(ctx.Session.CommandLevel)
+				}
 				fmt.Println(ctx.Translator.T("runloop.elevation_expired"))
 				rl.SetPrompt(buildPrompt(ctx))
 				treeListener.SetPrompt(buildPrompt(ctx))
@@ -1074,7 +1266,8 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 		// something as part of resolving a command, not as part of a
 		// "| include" pattern.
 		if len(cmdTokens) > 0 && cmdTokens[len(cmdTokens)-1] == "?" {
-			help := command.HelpForPath(ctx.Position.Current().Tree, cmdTokens[:len(cmdTokens)-1], ctx.Translator, ctx.ListOptions)
+			width := paging.EffectiveTerminalWidth(opts.TerminalFD, ctx.TerminalWidth, ctx.DefaultTerminalWidth)
+			help := command.HelpForPath(ctx.Position.Current().Tree, cmdTokens[:len(cmdTokens)-1], ctx.Translator, ctx.ListOptions, width)
 			if help != "" {
 				fmt.Print(help)
 			}
@@ -1230,6 +1423,19 @@ func runLoop(rl *readline.Instance, treeListener *completer.TreeListener, ctx *c
 				runErr = res.Command.RunFunc(ctx, res.Args)
 			}
 			ctx.Negated = false
+			// SetLevel runs before the audit logging just below, not
+			// after, specifically so a command that itself changes
+			// ctx.Session.CommandLevel, "enable" among them, reports
+			// its own new, already-current level on the very
+			// AuditEvent this same dispatch is about to send, rather
+			// than the level it ran from; a connected daemon's own
+			// "show users" therefore always reflects a session's own
+			// freshest Command Level as of its most recently dispatched
+			// command, never one dispatch stale. See
+			// daemon.RemoteClient.SetLevel's own doc comment.
+			if opts.RemoteClient != nil {
+				opts.RemoteClient.SetLevel(ctx.Session.CommandLevel)
+			}
 			isLoggableNow := ctx.Audit.WouldLog()
 			if wasLoggable || isLoggableNow {
 				ctx.Audit.ForceLog(username, line, runErr == nil)

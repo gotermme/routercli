@@ -78,16 +78,33 @@ import (
 // otherwise an end user could type either form, believe they just
 // changed this level's access, and never learn that the vendor
 // defined secret is still the one actually gating entry.
+//
+// currentUserSettableLevel's own lookup and permission check stay a
+// direct read off ctx.Levels, matching every other framework-level
+// Levels lookup in this project; command.DaemonClient exposes only
+// Mutate methods, no Read method of any kind. Only the actual
+// PasswordHash write below runs inside
+// ctx.DaemonClient.MutateLevels, re-resolved from the closure's own
+// levels parameter by level.Name rather than by reusing the level
+// pointer currentUserSettableLevel already returned, the same
+// discipline cmd_hostname.go's own "hostname" handler already
+// follows.
 func init() {
 	command.Register("password-manager", func(ctx *command.AppContext, args []string) error {
 		level, err := currentUserSettableLevel(ctx)
 		if err != nil {
 			return err
 		}
+		levelName := level.Name
 
 		if ctx.Negated {
-			level.PasswordHash = ""
-			ctx.Logger.Debugln("DEBUG: password cleared for Command Level", level.Name)
+			if _, err := ctx.DaemonClient.MutateLevels(func(levels *command.TreeStructure) (any, error) {
+				levels.ByName[levelName].PasswordHash = ""
+				return nil, nil
+			}); err != nil {
+				return err
+			}
+			ctx.Logger.Debugln("DEBUG: password cleared for Command Level", levelName)
 			fmt.Println(ctx.Translator.T("password_manager.cleared"))
 			return nil
 		}
@@ -100,8 +117,13 @@ func init() {
 		if err != nil {
 			return err
 		}
-		level.PasswordHash = hash
-		ctx.Logger.Debugln("DEBUG: password set for Command Level", level.Name)
+		if _, err := ctx.DaemonClient.MutateLevels(func(levels *command.TreeStructure) (any, error) {
+			levels.ByName[levelName].PasswordHash = hash
+			return nil, nil
+		}); err != nil {
+			return err
+		}
+		ctx.Logger.Debugln("DEBUG: password set for Command Level", levelName)
 		fmt.Println(ctx.Translator.T("password_manager.confirm"))
 		return nil
 	})
@@ -111,14 +133,20 @@ func init() {
 		if err != nil {
 			return err
 		}
+		levelName := level.Name
 
 		hash := args[0]
 		if !auth.IsRecognizedHash(hash) {
 			return fmt.Errorf("%s", ctx.Translator.T("password_manager.hash.not_recognized"))
 		}
 
-		level.PasswordHash = hash
-		ctx.Logger.Debugln("DEBUG: password hash set directly for Command Level", level.Name)
+		if _, err := ctx.DaemonClient.MutateLevels(func(levels *command.TreeStructure) (any, error) {
+			levels.ByName[levelName].PasswordHash = hash
+			return nil, nil
+		}); err != nil {
+			return err
+		}
+		ctx.Logger.Debugln("DEBUG: password hash set directly for Command Level", levelName)
 		fmt.Println(ctx.Translator.T("password_manager.confirm"))
 		return nil
 	})

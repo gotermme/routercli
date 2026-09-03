@@ -27,6 +27,12 @@ func TestPasswordManagerNegatedClearsPasswordHash(t *testing.T) {
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
 	ctx.Negated = true
+	// rewireDaemonClient shares this exact TreeStructure with
+	// ctx.DaemonClient's own Store, so cmd_password_manager.go's own
+	// ctx.DaemonClient.MutateLevels call sees, and modifies, the same
+	// level this test asserts against below. See rewireDaemonClient's
+	// own doc comment in testhelpers_test.go.
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager")
 
 	if err := cmd.RunFunc(ctx, nil); err != nil {
@@ -47,6 +53,7 @@ func TestPasswordManagerErrorsWhenCurrentLevelNotFound(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{}}
 	ctx.Session = &auth.Session{CommandLevel: "nonexistent"}
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager")
 
 	if err := cmd.RunFunc(ctx, nil); err == nil {
@@ -66,6 +73,7 @@ func TestPasswordManagerRefusesToSetWhenNotUserSettable(t *testing.T) {
 	level := &command.CommandLevel{Name: "exec", VendorDefinedPasswordHash: "$6$$vendorhash", Hidden: true}
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager")
 
 	if err := cmd.RunFunc(ctx, nil); err == nil {
@@ -87,6 +95,7 @@ func TestPasswordManagerRefusesToClearWhenNotUserSettable(t *testing.T) {
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
 	ctx.Negated = true
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager")
 
 	if err := cmd.RunFunc(ctx, nil); err == nil {
@@ -117,6 +126,7 @@ func TestPasswordManagerHashSetsPasswordHashDirectly(t *testing.T) {
 	level := &command.CommandLevel{Name: "exec"}
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager.hash")
 
 	if err := cmd.RunFunc(ctx, []string{hash}); err != nil {
@@ -136,6 +146,7 @@ func TestPasswordManagerHashRefusesAnUnrecognizedValue(t *testing.T) {
 	level := &command.CommandLevel{Name: "exec"}
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager.hash")
 
 	if err := cmd.RunFunc(ctx, []string{"hunter2"}); err == nil {
@@ -161,6 +172,7 @@ func TestPasswordManagerHashRefusesWhenNotUserSettable(t *testing.T) {
 	level := &command.CommandLevel{Name: "exec", VendorDefinedPasswordHash: "$6$$vendorhash", Hidden: true}
 	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{"exec": level}}
 	ctx.Session = &auth.Session{CommandLevel: "exec"}
+	rewireDaemonClient(ctx)
 	cmd := loadTestCommand(t, "password-manager.hash")
 
 	if err := cmd.RunFunc(ctx, []string{hash}); err == nil {

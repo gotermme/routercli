@@ -31,25 +31,38 @@ type SystemConfig struct {
 	// default is "RouterCLI" itself, see DefaultSystemConfig, so a
 	// deployment that never sets this still gets a real, sensible
 	// title rather than a blank one.
-	ProductName                    string   `yaml:"ProductName"`
-	PreventEscape                  bool     `yaml:"PreventEscape"`
-	LogLevel                       int      `yaml:"LogLevel"`
-	LogFile                        string   `yaml:"LogFile"`
-	HistoryFile                    string   `yaml:"HistoryFile"`
-	AuditLogFile                   string   `yaml:"AuditLogFile"`
-	AuditLogEnabled                bool     `yaml:"AuditLogEnabled"`
-	CurrentLanguage                string   `yaml:"CurrentLanguage"`
-	DefaultLanguage                string   `yaml:"DefaultLanguage"`
-	LanguageDir                    string   `yaml:"LanguageDir"`
-	SessionIdleTimeout             Duration `yaml:"SessionIdleTimeout"`
-	ElevationTimeout               Duration `yaml:"ElevationTimeout"`
-	ReauthGracePeriod              Duration `yaml:"ReauthGracePeriod"`
-	SuConfigTrustWindow            Duration `yaml:"SuConfigTrustWindow"`
-	TreeStructure                  string   `yaml:"TreeStructure"`
-	CommonTreeFile                 string   `yaml:"CommonTreeFile"`
-	StartupConfigFile              string   `yaml:"StartupConfigFile"`
-	AuthRequired                   bool     `yaml:"AuthRequired"`
-	UsersFile                      string   `yaml:"UsersFile"`
+	ProductName         string   `yaml:"ProductName"`
+	PreventEscape       bool     `yaml:"PreventEscape"`
+	LogLevel            int      `yaml:"LogLevel"`
+	LogFile             string   `yaml:"LogFile"`
+	HistoryFile         string   `yaml:"HistoryFile"`
+	AuditLogFile        string   `yaml:"AuditLogFile"`
+	AuditLogEnabled     bool     `yaml:"AuditLogEnabled"`
+	CurrentLanguage     string   `yaml:"CurrentLanguage"`
+	DefaultLanguage     string   `yaml:"DefaultLanguage"`
+	LanguageDir         string   `yaml:"LanguageDir"`
+	SessionIdleTimeout  Duration `yaml:"SessionIdleTimeout"`
+	ElevationTimeout    Duration `yaml:"ElevationTimeout"`
+	ReauthGracePeriod   Duration `yaml:"ReauthGracePeriod"`
+	SuConfigTrustWindow Duration `yaml:"SuConfigTrustWindow"`
+	TreeStructure       string   `yaml:"TreeStructure"`
+	CommonTreeFile      string   `yaml:"CommonTreeFile"`
+	StartupConfigFile   string   `yaml:"StartupConfigFile"`
+	AuthRequired        bool     `yaml:"AuthRequired"`
+	UsersFile           string   `yaml:"UsersFile"`
+
+	// DaemonSocketPath is the Unix domain socket a real RouterCLI
+	// daemon listens on, and a CLI client connects to, for shared
+	// state and multi session awareness; see
+	// claude/DAEMON_ARCHITECTURE_DESIGN.md for the full design. Empty,
+	// its default, means exactly what routercli has always done: the
+	// CLI runs standalone, one process per connection, its own state
+	// freshly loaded at boot, no daemon involved at all. A deployment
+	// sets this field, and runs the daemon binary pointed at the same
+	// path, only when it actually wants shared state across sessions;
+	// the same opt-in shape every other property in this project's own
+	// configuration already follows.
+	DaemonSocketPath               string   `yaml:"DaemonSocketPath"`
 	LoginMaxAttempts               int      `yaml:"LoginMaxAttempts"`
 	LoginAttemptWindow             Duration `yaml:"LoginAttemptWindow"`
 	LoginLockoutDuration           Duration `yaml:"LoginLockoutDuration"`

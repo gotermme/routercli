@@ -60,6 +60,24 @@ type TreeListener struct {
 	currentPrompt      string
 	lastAmbiguousInput string
 	tapCount           int
+
+	// terminalFD, terminalWidthOverride, and defaultTerminalWidth
+	// together are handleHelp's own live terminal width source,
+	// paging.EffectiveTerminalWidth's own three parameters, held here
+	// rather than resolved once at construction time so a mid session
+	// terminal resize is reflected the next time "?" is pressed, the
+	// same freshness cmd_help.go's own "help" handler already gives
+	// command.DetailedHelp. See SetTerminalWidth below for how these
+	// are actually set. terminalFD defaults to -1 in New, an fd
+	// term.GetSize always fails against, so a TreeListener
+	// SetTerminalWidth is never called on, every test in this package
+	// included, falls straight back to defaultTerminalWidth, itself
+	// left at zero, which command.HelpForPath's own
+	// effectiveManPageWidth reads as "use the ordinary 80 column
+	// default."
+	terminalFD            int
+	terminalWidthOverride *int
+	defaultTerminalWidth  int
 }
 
 // ----------------------------------------------------------------------
@@ -82,5 +100,20 @@ type TreeListener struct {
 // *i18n.Translator the same way ResolvedDesc and ResolvedHelp do, falling
 // back to the literal ArgHelp field.
 func New(position *command.CommandLevelStack, instance *readline.Instance, logger *log.Logger, translator *i18n.Translator, listOptions command.ListOptions) *TreeListener {
-	return &TreeListener{position: position, instance: instance, logger: logger, translator: translator, listOptions: listOptions, tapCount: 0}
+	return &TreeListener{position: position, instance: instance, logger: logger, translator: translator, listOptions: listOptions, tapCount: 0, terminalFD: -1}
+}
+
+// SetTerminalWidth - This method records this session's own live
+// terminal width source, matching paging.EffectiveTerminalWidth's own
+// fd, override, and fallback parameters exactly, so handleHelp can wrap
+// a long "?" listing's own description column the same way
+// cmd_help.go's "help" handler already wraps command.DetailedHelp's
+// output. main.go calls this once, right alongside SetPrompt, after
+// New itself returns. Leaving this uncalled keeps New's own -1
+// terminalFD default in place, falling back to fallback, the same
+// behavior every test in this package already relies on.
+func (l *TreeListener) SetTerminalWidth(fd int, override *int, fallback int) {
+	l.terminalFD = fd
+	l.terminalWidthOverride = override
+	l.defaultTerminalWidth = fallback
 }

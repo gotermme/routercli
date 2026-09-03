@@ -11,6 +11,34 @@ ProductName: RouterCLI
 
 # --- Command Tree Location ---
 TreeStructure: var/tree/tree_structure.yaml
+#
+# CommonTreeFile holds the commands common to every Command Level,
+# help, "?", exit, end, merged into each level at load time unless
+# that level sets skip_common. See MergeCommonCommands, further down,
+# for whether a merged common command sorts alongside every other
+# command in a listing or is appended after them instead.
+CommonTreeFile: var/tree/level_common.yaml
+
+
+# --- Daemon (Shared State) ---
+# DaemonSocketPath is the Unix domain socket a real routercli-daemon
+# process listens on, and a routercli CLI process connects to, for
+# state shared across every attached session rather than each session
+# holding its own separate, driftable copy. See
+# claude/DAEMON_ARCHITECTURE_DESIGN.md for the full design.
+#
+# Left unset, its default, routercli runs exactly as it always has,
+# standalone, one process per connection, its own state freshly loaded
+# at boot, no daemon involved at all. Set this only once a real
+# routercli-daemon binary is actually running, pointed at the same
+# path, with "go build ./cmd/routercli-daemon" from the repository
+# root. The daemon's own static identity key pair, used to authenticate
+# itself to a connecting client, is generated automatically the first
+# time it starts, and written beside the socket path itself, as
+# "<DaemonSocketPath>.key", kept private to the daemon, and
+# "<DaemonSocketPath>.key.pub", read by every connecting CLI client;
+# neither file needs a configuration entry of its own.
+# DaemonSocketPath: var/run/routercli.sock
 
 
 # --- Startup Configuration ---
@@ -73,7 +101,7 @@ SuConfigTrustWindow: 5m
 # AuthRequired turns on the login prompt at startup. Off by default so
 # the example works with zero setup. UsersFile is only read when
 # AuthRequired is true.
-AuthRequired: false
+AuthRequired: true
 UsersFile: etc/users.yaml
 LoginMaxAttempts: 3
 #

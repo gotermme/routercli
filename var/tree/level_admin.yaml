@@ -87,6 +87,28 @@ commands:
     negatable: true
     run: reload
 
+  disconnect:
+    desc_key: disconnect.desc
+    subcommands:
+      user:
+        desc_key: disconnect.user.desc
+        arghelp_key: disconnect.user.arghelp
+        minargs: 1
+        maxargs: 2
+        maxarglength: 64
+        # A bare username disconnects that user's own one session when
+        # exactly one is attached, and refuses with a candidate listing
+        # when more than one is; a session ID, the same short
+        # identifier "show users" already prints per row, names one
+        # exactly. Real daemon required, see
+        # cmd/core/cmd_admin.go's own runDisconnectUser and
+        # claude/DAEMON_ARCHITECTURE_DESIGN.md's own "DisconnectUser"
+        # description. Pruned out of this level's own tree entirely
+        # for a deployment with no daemon configured, see main.go's
+        # own featureFlags.
+        requires: daemon
+        run: disconnect.user
+
   account:
     desc_key: account.desc
     subcommands:

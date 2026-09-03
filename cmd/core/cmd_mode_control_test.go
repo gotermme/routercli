@@ -8,6 +8,7 @@ package core
 import (
 	"testing"
 
+	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/command"
 )
 
@@ -80,5 +81,77 @@ func TestEndHandlerAtRootIsNoOp(t *testing.T) {
 	}
 	if ctx.Position.Depth() != 1 {
 		t.Errorf("Position.Depth() = %d, want 1", ctx.Position.Depth())
+	}
+}
+
+// TestEndHandlerFromAdminCrossesBackToExec - This test verifies that
+// "end" run from admin, a real Command Level reached through
+// command.EnterCommandLevel rather than a pushed Position frame, lands
+// the session back in exec, not just at admin's own root frame. This
+// is the exact case the user reported: typing "end" at router(admin)#
+// visibly did nothing, since PopToRoot alone never crosses a Command
+// Level boundary.
+func TestEndHandlerFromAdminCrossesBackToExec(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "admin"}
+	ctx.Position = command.NewCommandLevelStack("admin", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "end")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("end handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "exec")
+	}
+	if ctx.Position.Depth() != 1 {
+		t.Errorf("Position.Depth() = %d, want 1", ctx.Position.Depth())
+	}
+}
+
+// TestEndHandlerFromNestedPositionWithinAdminCrossesBackToExec - This
+// test verifies that "end" first collapses any pushed frames within
+// admin's own Position stack, then still crosses the Command Level
+// boundary back to exec, exercising both steps "end" now performs in
+// a single call.
+func TestEndHandlerFromNestedPositionWithinAdminCrossesBackToExec(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = adminExecLevels()
+	ctx.Session = &auth.Session{CommandLevel: "admin"}
+	ctx.Position = command.NewCommandLevelStack("admin", "", map[string]*command.Command{})
+	ctx.Position.Push(command.CommandLevelFrame{Name: "admin-nested"})
+	cmd := loadTestCommand(t, "end")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("end handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "exec" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "exec")
+	}
+	if ctx.Position.Depth() != 1 {
+		t.Errorf("Position.Depth() = %d, want 1", ctx.Position.Depth())
+	}
+}
+
+// TestEndHandlerFromUserFallsBackToBaseWhenExecIsNeverReached - This
+// test verifies that "end" run from user, whose Parent is base
+// directly rather than exec, per var/tree/tree_structure.yaml, walks
+// the parent chain until it runs out rather than looping or panicking
+// when exec is never reached at all.
+func TestEndHandlerFromUserFallsBackToBaseWhenExecIsNeverReached(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{ByName: map[string]*command.CommandLevel{
+		"base": {Name: "base", Tree: map[string]*command.Command{}},
+		"user": {Name: "user", Parent: "base", PromptSuffix: "(user)", Tree: map[string]*command.Command{}},
+	}}
+	ctx.Session = &auth.Session{CommandLevel: "user"}
+	ctx.Position = command.NewCommandLevelStack("user", "", map[string]*command.Command{})
+	cmd := loadTestCommand(t, "end")
+
+	if err := cmd.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("end handler returned unexpected error: %v", err)
+	}
+	if ctx.Session.CommandLevel != "base" {
+		t.Errorf("Session.CommandLevel = %q, want %q", ctx.Session.CommandLevel, "base")
 	}
 }

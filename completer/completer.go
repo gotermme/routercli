@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/paging"
 
 	"github.com/chzyer/readline"
 )
@@ -258,7 +259,8 @@ func (l *TreeListener) handleHelp(line []rune, pos int) (newLine []rune, newPos 
 	tree := l.position.Current().Tree
 	tokens, _ = unwrapHelpTokens(tree, tokens)
 
-	help := command.HelpForPath(tree, tokens, l.translator, l.listOptions)
+	width := paging.EffectiveTerminalWidth(l.terminalFD, l.terminalWidthOverride, l.defaultTerminalWidth)
+	help := command.HelpForPath(tree, tokens, l.translator, l.listOptions, width)
 	if help != "" {
 		fmt.Fprint(l.instance.Stdout(), l.currentPrompt+string(line[:pos-1])+"?\n"+help)
 	}

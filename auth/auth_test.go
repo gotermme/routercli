@@ -112,3 +112,53 @@ func TestIsRecognizedHash(t *testing.T) {
 		t.Error("expected an empty value to not be recognized")
 	}
 }
+
+// TestPlaintextHasherHashAlwaysFails - This test verifies that
+// plaintextHasher.Hash returns a non-nil error for every input,
+// including an empty string, and never returns a usable encoded
+// value alongside it. This is a genuine security invariant, not an
+// arbitrary choice: cryptIDPlaintext exists only for a "$0$..." entry
+// typed by hand into etc/users.yaml for local development and
+// testing, and HashPassword must never be able to produce one for a
+// real deployment, see this type's own doc comment in auth.go.
+func TestPlaintextHasherHashAlwaysFails(t *testing.T) {
+	for _, password := range []string{"hunter2", "", "correct horse battery staple"} {
+		encoded, err := plaintextHasher{}.Hash(password)
+		if err == nil {
+			t.Errorf("plaintextHasher{}.Hash(%q) returned nil error, want a non-nil error", password)
+		}
+		if encoded != "" {
+			t.Errorf("plaintextHasher{}.Hash(%q) returned encoded value %q alongside its error, want empty", password, encoded)
+		}
+	}
+}
+
+// TestPlaintextHasherDummyReturnsAFixedPlaceholder - This test
+// verifies that plaintextHasher.Dummy returns the fixed literal
+// "not-a-real-password" every time, matching its own doc comment, and
+// that this placeholder never itself verifies as a real password
+// through Verify. auth/provider.go calls Verify(Dummy(), password)
+// specifically when a login attempt names a username that does not
+// exist, a timing attack mitigation so response latency cannot reveal
+// whether a username is valid; a placeholder that ever verified would
+// defeat the entire point of calling Dummy at all.
+func TestPlaintextHasherDummyReturnsAFixedPlaceholder(t *testing.T) {
+	h := plaintextHasher{}
+	dummy := h.Dummy()
+	if dummy != "not-a-real-password" {
+		t.Errorf("plaintextHasher{}.Dummy() = %q, want %q", dummy, "not-a-real-password")
+	}
+	for _, candidate := range []string{"", "hunter2", "not-a-real-password"} {
+		if candidate == dummy {
+			// A candidate that happens to equal the placeholder itself
+			// is expected to verify; that is plain string equality
+			// working correctly, not a defeated mitigation. A real
+			// login attempt is never typing the placeholder text
+			// itself as its password.
+			continue
+		}
+		if h.Verify(dummy, candidate) {
+			t.Errorf("plaintextHasher{}.Verify(Dummy(), %q) = true, want false", candidate)
+		}
+	}
+}

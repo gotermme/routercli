@@ -122,7 +122,20 @@ func SortCommandNames(names []string, tree map[string]*Command, opts ListOptions
 // and always ordered the same way between runs, since Go's map
 // iteration order is randomized, driven by opts, see SortCommandNames,
 // which does the actual ordering.
-func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions) string {
+//
+// width is this session's own effective terminal width, the same value
+// a caller already resolves through paging.EffectiveTerminalWidth for
+// DetailedHelp, run through effectiveManPageWidth here too, so a zero
+// or otherwise unusable value, a piped "help\n" with no real terminal
+// behind it for instance, still falls back to the ordinary 80 column
+// default rather than an unwrapped line. A description too long to fit
+// next to its own command name on one line continues on the next,
+// indented to line up under the description column rather than back at
+// the left margin, so a session's own terminal never has to hard wrap
+// it there itself. This mirrors wrapAndIndent's own hanging indent,
+// only with the indent width set by this listing's own longest command
+// name rather than a fixed section margin.
+func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions, width int) string {
 	var names []string
 	for name, cmd := range tree {
 		if cmd.Hidden {
@@ -144,6 +157,17 @@ func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions) st
 		}
 	}
 
+	// "  " before the name, the name itself padded to longest, then
+	// "  " again before the description, matching the Fprintf format
+	// string below exactly, is how wide a continuation line's own
+	// leading indent needs to be to land right under where the
+	// description column itself starts.
+	indent := strings.Repeat(" ", 2+longest+2)
+	descWidth := effectiveManPageWidth(width) - len(indent)
+	if descWidth < 20 {
+		descWidth = 20
+	}
+
 	var b strings.Builder
 	header := "Available commands:"
 	if t != nil {
@@ -155,7 +179,11 @@ func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions) st
 			fmt.Fprintf(&b, "  %s\n", e.path)
 			continue
 		}
-		fmt.Fprintf(&b, "  %-*s  %s\n", longest, e.path, e.desc)
+		descLines := wrapText(e.desc, descWidth)
+		fmt.Fprintf(&b, "  %-*s  %s\n", longest, e.path, descLines[0])
+		for _, line := range descLines[1:] {
+			fmt.Fprintf(&b, "%s%s\n", indent, line)
+		}
 	}
 	return b.String()
 }
@@ -198,10 +226,15 @@ func HelpText(tree map[string]*Command, t *i18n.Translator, opts ListOptions) st
 // which does the actual ordering; "<cr>" itself is never subject to
 // opts, it is always last.
 //
+// width is threaded straight through to HelpText, for the full help
+// case below, see that function's own doc comment for what it does
+// with it; the word help and single command cases print no column
+// aligned listing of their own, so width has nothing to affect there.
+//
 // This returns an empty string if the tokens do not resolve to anything
 // at all, such as "bogus-command ?". A caller treats that as nothing to
 // show.
-func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, opts ListOptions) string {
+func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, opts ListOptions, width int) string {
 	if len(tokens) == 0 {
 		tokens = []string{""}
 	}
@@ -227,7 +260,7 @@ func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, 
 			// container res.Ambiguous's own candidates were drawn from,
 			// see ResolveResult.AmbiguousTree's own doc comment, instead
 			// of the bare names res.Ambiguous itself carries.
-			text := HelpText(res.AmbiguousTree, t, opts)
+			text := HelpText(res.AmbiguousTree, t, opts, width)
 			if res.RunnableAsIs {
 				text += "  <cr>\n"
 			}
@@ -248,7 +281,7 @@ func HelpForPath(tree map[string]*Command, tokens []string, t *i18n.Translator, 
 		}
 		return b.String()
 	case res.Command != nil && len(res.Command.Subcommands) > 0:
-		text := HelpText(res.Command.Subcommands, t, opts)
+		text := HelpText(res.Command.Subcommands, t, opts, width)
 		if res.RunnableAsIs {
 			text += "  <cr>\n"
 		}

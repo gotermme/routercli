@@ -79,6 +79,7 @@ func init() {
 	// state, ctx.ReloadScheduler. See runReload's own doc comment.
 	command.Register("reload", runReload)
 	command.Register("reboot", runReload)
+	command.Register("disconnect.user", runDisconnectUser)
 }
 
 // ----------------------------------------------------------------------
@@ -186,18 +187,29 @@ func runAccountCreateWithIO(ctx *command.AppContext, fd int, stdout io.Writer, a
 		return fmt.Errorf("%s", ctx.Translator.T("account.create.usage"))
 	}
 
-	ctx.Users[username] = &auth.User{
-		Username:           username,
-		PasswordHash:       hash,
-		MustChangePassword: mustChange,
+	// The pre-checks above, ctx.Users == nil and the already-exists
+	// lookup, stay direct reads off ctx.Users; only the write itself
+	// runs inside ctx.DaemonClient.MutateUsers, re-deriving its own
+	// working map from the closure's own users parameter rather than
+	// closing over ctx.Users, the same discipline cmd_hostname.go's own
+	// "hostname" handler already follows.
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		users[username] = &auth.User{
+			Username:           username,
+			PasswordHash:       hash,
+			MustChangePassword: mustChange,
+		}
+		return nil, nil
+	}); err != nil {
+		return err
 	}
-	// This only ever changes ctx.Users, in memory, never ctx.UsersFile
-	// on disk. See this file's own top of file doc comment, and
-	// design-goals.md's own "nothing survives a restart without an
-	// explicit save" core design goal, for why: a new account created
-	// here is gone again the next time this deployment reloads or
-	// restarts, unless a session explicitly runs "write memory" or a
-	// future equivalent first.
+	// This only ever changes the in memory user database, never
+	// ctx.UsersFile on disk. See this file's own top of file doc
+	// comment, and design-goals.md's own "nothing survives a restart
+	// without an explicit save" core design goal, for why: a new
+	// account created here is gone again the next time this deployment
+	// reloads or restarts, unless a session explicitly runs "write
+	// memory" or a future equivalent first.
 	ctx.Logger.Debugln("DEBUG: account", username, "created by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.create.confirm", username))
 	return nil
@@ -223,10 +235,18 @@ func runAccountDelete(ctx *command.AppContext, args []string) error {
 		return fmt.Errorf("%s", ctx.Translator.T("account.delete.last_bypass_role_holder", username))
 	}
 
-	delete(ctx.Users, username)
-	// See runAccountCreateWithIO's own comment right above: this only
-	// ever changes ctx.Users, in memory. A reload or restart before
-	// "write memory" brings the deleted account right back.
+	// See runAccountCreateWithIO's own comment above for why only the
+	// write itself, not the lookups above, runs inside
+	// ctx.DaemonClient.MutateUsers.
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		delete(users, username)
+		return nil, nil
+	}); err != nil {
+		return err
+	}
+	// This only ever changes the in memory user database. A reload or
+	// restart before "write memory" brings the deleted account right
+	// back.
 	ctx.Logger.Debugln("DEBUG: account", username, "deleted by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.delete.confirm", username))
 	return nil
@@ -289,9 +309,20 @@ func runAccountRolesAdd(ctx *command.AppContext, args []string) error {
 		return nil
 	}
 
-	user.Roles = append(user.Roles, roleName)
-	// See runAccountCreateWithIO's own comment for why this only ever
-	// changes user.Roles, in memory, never ctx.UsersFile on disk.
+	// See runAccountCreateWithIO's own comment for why only the write
+	// itself, not the lookups above, runs inside
+	// ctx.DaemonClient.MutateUsers, and re-derives user from the
+	// closure's own users parameter rather than reusing the user
+	// pointer read above.
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		target := users[username]
+		target.Roles = append(target.Roles, roleName)
+		return nil, nil
+	}); err != nil {
+		return err
+	}
+	// This only ever changes the in memory user database, never
+	// ctx.UsersFile on disk.
 	ctx.Logger.Debugln("DEBUG: role", roleName, "added to", username, "by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.roles.add.confirm", roleName, username))
 	return nil
@@ -323,9 +354,18 @@ func runAccountRolesRemove(ctx *command.AppContext, args []string) error {
 			kept = append(kept, r)
 		}
 	}
-	user.Roles = kept
-	// See runAccountCreateWithIO's own comment for why this only ever
-	// changes user.Roles, in memory, never ctx.UsersFile on disk.
+	// See runAccountCreateWithIO's own comment for why only the write
+	// itself runs inside ctx.DaemonClient.MutateUsers, re-deriving its
+	// own target from the closure's own users parameter rather than
+	// reusing the user pointer read above.
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		users[username].Roles = kept
+		return nil, nil
+	}); err != nil {
+		return err
+	}
+	// This only ever changes the in memory user database, never
+	// ctx.UsersFile on disk.
 	ctx.Logger.Debugln("DEBUG: role", roleName, "removed from", username, "by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("account.roles.remove.confirm", roleName, username))
 	return nil
@@ -493,6 +533,19 @@ func restoreFromDefaults(ctx *command.AppContext, live string, perm os.FileMode)
 // This instead replaces it with ctx.DefaultsDir's own skeleton copy,
 // see restoreFromDefaults, then reloads it into ctx.Users so the
 // current session immediately sees the restored account set.
+//
+// Unlike reloadFromDisk further down, which reassigns ctx.Users to a
+// freshly loaded map directly and always ends this process right
+// afterward, either through Reboot's own restart or through
+// runReload's own delayed reboot, "erase users" does not end the
+// session; it keeps running. Reassigning ctx.Users here the same way
+// would silently desync it from ctx.DaemonClient's own Store, whose
+// Users field would then go on holding the map from before the erase.
+// clear, instead, then repopulate, keeps the exact same map object
+// ctx.Users, and the Store, both already point at, its own identity
+// intact, so the two never diverge; see main.go's own startup
+// comment, right where daemonClient is constructed, for the matching
+// half of this same guarantee.
 func runEraseUsers(ctx *command.AppContext, args []string) error {
 	restored, err := restoreFromDefaults(ctx, ctx.UsersFile, 0600)
 	if err != nil {
@@ -502,11 +555,19 @@ func runEraseUsers(ctx *command.AppContext, args []string) error {
 		fmt.Println(ctx.Translator.T("erase_users.no_defaults"))
 		return nil
 	}
-	users, err := auth.LoadUsers(ctx.UsersFile)
+	freshUsers, err := auth.LoadUsers(ctx.UsersFile)
 	if err != nil {
 		return fmt.Errorf("%s", ctx.Translator.T("erase_users.failed", err))
 	}
-	ctx.Users = users
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		clear(users)
+		for username, user := range freshUsers {
+			users[username] = user
+		}
+		return nil, nil
+	}); err != nil {
+		return fmt.Errorf("%s", ctx.Translator.T("erase_users.failed", err))
+	}
 	ctx.Logger.Debugln("DEBUG: users.yaml restored to factory defaults by", ctx.Session.Username)
 	fmt.Println(ctx.Translator.T("erase_users.confirm"))
 	return nil
@@ -608,6 +669,46 @@ func runReload(ctx *command.AppContext, args []string) error {
 		return nil
 	}
 
+	return runReboot(ctx)
+}
+
+// runReboot is runReload's own immediate, no args, not negated branch,
+// separated out here so its own daemon aware decision reads clearly
+// on its own: a deployment configured with a real daemon,
+// config.SystemConfig.DaemonSocketPath non-empty, asks that daemon to
+// reboot instead of doing today's standalone, one session, work
+// itself, matching claude/DAEMON_ARCHITECTURE_DESIGN.md's own "What
+// reboot means once a real daemon exists" section; a deployment with
+// no daemon configured keeps doing exactly what it already did before
+// this phase.
+func runReboot(ctx *command.AppContext) error {
+	err := ctx.DaemonClient.Reboot()
+	if err == nil {
+		// The daemon accepted this request. It is already rereading
+		// its own canonical state from disk, ProductState, Levels'
+		// own runtime aliases and level passwords, Users, and Roles
+		// alike, and is about to broadcast a "Device is rebooting"
+		// farewell to every attached session, this one included, see
+		// daemon.Server.TriggerReboot's own doc comment. This
+		// session's own ending therefore arrives asynchronously,
+		// through this session's own FarewellChannel and main.go's
+		// own runLoop, not through this call returning, so nothing
+		// more is printed or returned here. command.ErrQuit
+		// specifically is not returned, since that would end this one
+		// session immediately, ahead of, and independently from, the
+		// farewell every other attached session is about to receive
+		// the exact same, uniform way.
+		return nil
+	}
+	if !errors.Is(err, command.ErrDaemonNotConfigured) {
+		return fmt.Errorf("%s", ctx.Translator.T("reload.failed", err))
+	}
+	// No real daemon backs this deployment; fall back to exactly the
+	// standalone behavior this command already had before daemon
+	// support existed at all: reread from disk and end this one
+	// session alone, the same reasoning runReload's own doc comment
+	// already gives for why RouterCLI, standalone, has no other
+	// connected session to notify anyway.
 	if err := reloadFromDisk(ctx); err != nil {
 		return err
 	}
@@ -625,6 +726,23 @@ func runReload(ctx *command.AppContext, args []string) error {
 // session nor printing anything to the terminal is this function's
 // job; each of its two callers does that its own way, an ordinary
 // command.ErrQuit return here, a background timer firing there.
+//
+// ctx.Users and ctx.Roles are reassigned directly here, deliberately
+// not routed through ctx.DaemonClient.MutateUsers or MutateRoles, the
+// way "erase users" above now is. Both of this function's callers,
+// runReboot's own standalone, no daemon fallback above and
+// ReloadFromDiskForRestart below, always end the process, the first
+// through command.ErrQuit, the second through main.go's own runLoop
+// exiting right after calling it, so there is no window afterward in
+// which some other handler could read a stale Store left holding the
+// map or struct from before this reassignment; unlike "erase users",
+// which keeps running its own session afterward, and needed the
+// clear-and-repopulate treatment for exactly that reason, see that
+// function's own doc comment. This bulk, wholesale replacement, of the
+// entire Users map and the entire Roles struct at once, also does not
+// fit MutateUsers's or MutateRoles's own incremental closure shape to
+// begin with, matching Reboot's own separate, non-Mutate method on
+// command.DaemonClient for the exact same reason.
 func reloadFromDisk(ctx *command.AppContext) error {
 	if ctx.UsersFile != "" {
 		users, err := auth.LoadUsers(ctx.UsersFile)
@@ -657,4 +775,51 @@ func reloadFromDisk(ctx *command.AppContext) error {
 // the session afterward.
 func ReloadFromDiskForRestart(ctx *command.AppContext) error {
 	return reloadFromDisk(ctx)
+}
+
+// ----------------------------------------------------------------------
+// disconnect user
+// ----------------------------------------------------------------------
+
+// runDisconnectUser is the registered "disconnect user <username>
+// [<session-id>]" handler, belonging beside "reboot" in this same
+// admin Command Level, gated the same way, since
+// claude/DAEMON_ARCHITECTURE_DESIGN.md's own wording puts it plainly:
+// "disconnect user belongs beside reboot in the existing admin
+// Command Level, gated the same way, since it carries exactly the
+// same weight." args[0] is always the target username, already
+// guaranteed by var/tree/level_admin.yaml's own minargs; args[1], the
+// session ID naming one session exactly, is present only when someone
+// typed one, most commonly to resolve the ambiguity a first, bare
+// attempt already reported.
+//
+// ctx.DaemonClient.DisconnectUser does the actual work and the actual
+// disambiguation, refusing with a clear, candidate-listing error when
+// username alone matches more than one attached session; this handler
+// itself has no session registry of its own to consult and does not
+// try to build one. command.ErrDaemonNotConfigured specifically is
+// translated into its own clearer message here, rather than the
+// generic failure text every other error gets, since a deployment
+// with no daemon configured is expected to have this command pruned
+// out of its own tree entirely, see main.go's own featureFlags; a
+// deployment that somehow still reaches this handler, a stale binary
+// against a freshly edited configuration for instance, gets an honest
+// explanation instead of a wording error that reads like a real,
+// per-user failure.
+func runDisconnectUser(ctx *command.AppContext, args []string) error {
+	username := args[0]
+	sessionID := ""
+	if len(args) > 1 {
+		sessionID = args[1]
+	}
+
+	if err := ctx.DaemonClient.DisconnectUser(username, sessionID); err != nil {
+		if errors.Is(err, command.ErrDaemonNotConfigured) {
+			return fmt.Errorf("%s", ctx.Translator.T("disconnect.user.not_supported"))
+		}
+		return fmt.Errorf("%s", ctx.Translator.T("disconnect.user.failed", err))
+	}
+	ctx.Logger.Debugln("DEBUG: disconnect user run by", ctx.Session.Username, "against", username)
+	fmt.Println(ctx.Translator.T("disconnect.user.confirm", username))
+	return nil
 }

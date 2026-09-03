@@ -33,6 +33,20 @@ func init() {
 
 	command.Register("end", func(ctx *command.AppContext, args []string) error {
 		ctx.Position.PopToRoot()
+		for ctx.Levels != nil && ctx.Session != nil && ctx.Session.CommandLevel != "exec" {
+			level, ok := ctx.Levels.ByName[ctx.Session.CommandLevel]
+			if !ok || level.Parent == "" {
+				break
+			}
+			parent, ok := ctx.Levels.ByName[level.Parent]
+			if !ok {
+				break
+			}
+			exited, err := command.ExitCommandLevel(ctx, level, parent)
+			if err != nil || !exited {
+				break
+			}
+		}
 		return nil
 	})
 }

@@ -31,6 +31,12 @@ func newTOTPTestContext(t *testing.T, username string, u *auth.User) *command.Ap
 	ctx.Session = &auth.Session{Username: username, Authenticated: true}
 	ctx.Users = auth.Users{username: u}
 	ctx.UsersFile = filepath.Join(t.TempDir(), "users.yaml")
+	// rewireDaemonClient shares this exact Users map with
+	// ctx.DaemonClient's own Store, so finishTOTPEnable's and
+	// finishTOTPDisable's own ctx.DaemonClient.MutateUsers calls see,
+	// and modify, the same ctx.Users a test asserts against afterward.
+	// See rewireDaemonClient's own doc comment in testhelpers_test.go.
+	rewireDaemonClient(ctx)
 	return ctx
 }
 

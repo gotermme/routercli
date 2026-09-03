@@ -13,6 +13,7 @@ import (
 
 	"github.com/gologme/log"
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/daemon"
 )
 
 // newTestContext - This function builds a minimal *command.AppContext
@@ -27,11 +28,48 @@ import (
 // ProductState here, nil in package core, and package product cannot
 // export a test-only helper for package core to import without pulling
 // a test file into a non-test build.
+//
+// DaemonClient wraps the exact same *ProductState pointer State
+// itself holds, daemon.NewStandaloneClient given no Levels, Users, or
+// Roles of its own, empty here since a plain newTestContext, on its
+// own, never reaches them through DaemonClient. Sharing the one
+// pointer between State and DaemonClient's own wrapped State.ProductState
+// keeps a test free to read or set State.(*ProductState) fields
+// directly, the pre-migration pattern most of this package's own
+// tests still use, while a handler already migrated to
+// ctx.DaemonClient.MutateProductState, cmd_hostname.go's "hostname"
+// for instance, observes and mutates that identical object.
+//
+// A test that goes on to assign a real ctx.Levels of its own, then
+// replays saved configuration text through command.ReplayLines rather
+// than only rendering it, can reach a Levels-mutating handler this
+// package never registers itself, cmd/core's own "alias" among them,
+// through this file's blank import of package core. Such a test must
+// call rewireDaemonClient below after assigning ctx.Levels, the same
+// way cmd/core's own tests do for the handlers this package's tests
+// exercise the mirror image of; see that function's own doc comment.
 func newTestContext() *command.AppContext {
+	state := &ProductState{}
 	return &command.AppContext{
-		State:  &ProductState{},
-		Logger: log.New(io.Discard, "", 0),
+		State:        state,
+		DaemonClient: daemon.NewStandaloneClient(daemon.NewState(state, nil, nil, nil, nil)),
+		Logger:       log.New(io.Discard, "", 0),
 	}
+}
+
+// rewireDaemonClient - This function replaces ctx.DaemonClient with a
+// fresh daemon.NewStandaloneClient whose own Store shares the exact
+// same ctx.State, ctx.Levels, ctx.Users, and ctx.Roles a test has
+// already assigned, rather than the disconnected copy newTestContext
+// started out holding. See cmd/core's own identically named,
+// identically documented helper in that package's own
+// testhelpers_test.go for the full reasoning; this is that same
+// helper, duplicated here rather than shared, for the same reason
+// newTestContext itself is duplicated rather than exported: package
+// product and package core stay independent siblings, neither
+// importing the other.
+func rewireDaemonClient(ctx *command.AppContext) {
+	ctx.DaemonClient = daemon.NewStandaloneClient(daemon.NewState(ctx.State, ctx.Levels, ctx.Users, ctx.Roles, nil))
 }
 
 // loadTestCommand - This function resolves handlerName into its

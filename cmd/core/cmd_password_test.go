@@ -37,6 +37,12 @@ func newPasswordTestContext(t *testing.T, username string, u *auth.User) *comman
 	ctx.PasswordPolicy = auth.PasswordPolicy{MinLength: 1}
 	ctx.PasswordChangeMaxAttempts = 3
 	ctx.AuthProvider = auth.NewLocalAuthProvider(ctx.Users)
+	// rewireDaemonClient shares this exact Users map with
+	// ctx.DaemonClient's own Store, so finishPasswordChange's own
+	// ctx.DaemonClient.MutateUsers call sees, and modifies, the same
+	// ctx.Users a test asserts against afterward. See
+	// rewireDaemonClient's own doc comment in testhelpers_test.go.
+	rewireDaemonClient(ctx)
 	return ctx
 }
 

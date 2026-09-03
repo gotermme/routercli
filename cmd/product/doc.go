@@ -10,10 +10,13 @@ diagnostic self test, and the "set description" and "show *" commands
 that report this package's own state back out. Nothing here is part of
 the reusable framework, and nothing here is required by it. See
 package core, in cmd/core, for the separate set of command handlers,
-login and session elevation, configuration mode entry, terminal paging
-and filtering, and password and TOTP self service among them, broadly
-useful across projects that have nothing to do with network gear at
-all.
+login and session elevation, configuration mode entry, and password
+and TOTP self service among them, broadly useful across projects that
+have nothing to do with network gear at all, and package session, in
+cmd/session, for the narrower set of settings genuinely local to one
+connection, terminal paging and filtering among them, see that
+package's own doc comment for the boundary that separates it from both
+of the other two.
 
 This package exists to be replaced. A project built on routercli that
 is not modeling network equipment, or that simply wants a different
@@ -96,15 +99,74 @@ itself should have made unreachable.
 ctx.State is declared as any in package command, because package
 command has no idea what a project built on this framework will
 actually want to track, nor should it. Every handler in this package
-that touches state does the same type assertion:
+that reads or writes it, hostname, banner motd and banner login,
+description, interface description and shutdown, and line length,
+width, and paging, reaches it through ctx.DaemonClient rather than a
+direct type assertion on ctx.State, so a project built on this
+framework can add its own command against the identical pattern and
+have it work correctly whether this deployment is standalone or backed
+by a real daemon, config.SystemConfig.DaemonSocketPath set, with no
+change of its own once one exists. See
+claude/DAEMON_ARCHITECTURE_DESIGN.md and command.DaemonClient's own
+doc comment for the full design this follows.
 
-	state := ctx.State.(*ProductState)
+A write reaches ProductState through MutateProductState's own closure
+argument, never through ctx.State directly:
+
+	_, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+	        state := productState.(*ProductState)
+	        // Mutate state exactly as a direct ctx.State.(*ProductState)
+	        // type assertion would have.
+	        return nil, nil
+	})
+	return err
+
+Three rules keep this correct once a real daemon exists, not only in
+today's standalone deployment shape, where MutateProductState's own
+closure simply runs against ctx.State's identical underlying value:
+
+Resolve state from the closure's own productState parameter, every
+time, never from a *ProductState read or captured before the closure
+ran. A real, remote daemon implementation hands this closure a freshly
+fetched copy on each call, not the same pointer a handler read a
+moment earlier; see cmd_hostname.go's own doc comment for this same
+point made at greater length.
+
+Read anything session-local, not shared state, ctx.Position, ctx.Negated,
+and args among them, outside the closure, exactly where a handler
+already unmigrated would. cmd_description_if.go's own ifaceName, taken
+from ctx.Position.Current().Context before its own MutateProductState
+call, is a working example: nothing about which interface a command
+concerns is shared state, so nothing about resolving it needs the
+closure at all.
+
+Reserve MutateProductState for an actual write. A command that only
+ever reads ProductState, "show running-config" and "show interface" in
+cmd_show.go for instance, keeps reading ctx.State.(*ProductState)
+directly; command.DaemonClient exposes only Mutate methods, no Read
+method of any kind, which is itself the evidence reads were never
+meant to route through it. See runningConfigLines in cmd_show.go for a
+worked example of a read that deliberately stays direct.
 
 The definition for ProductState lives in model.go, in this package. It
 is a plain struct, one field per piece of running configuration style
 state, such as Hostname, Description, and per interface state. A
 project extending or replacing this package adds fields to its own
-equivalent type, not anywhere in package command or package core.
+equivalent type, not anywhere in package command or package core, and
+reaches every one of them the same MutateProductState way described
+above, whether the field already existed here or is entirely the
+project's own addition.
+
+A command a vendor adds that instead touches the tree structure's own
+runtime data, a Command Level's own defined aliases or its own
+PasswordHash, the user database, or the role set, reaches that
+through ctx.DaemonClient.MutateLevels, MutateUsers, or MutateRoles
+respectively, the same three rules above applying unchanged, only the
+shared value and its own accessor method differing. None of those
+three live in this package; see package core's own doc comment, under
+Application State there, for the full pattern and worked examples,
+since cmd_alias.go, cmd_password_manager.go, cmd_admin.go, and
+cmd_totp.go, every one of them already migrated, all live there.
 
 # Negation
 

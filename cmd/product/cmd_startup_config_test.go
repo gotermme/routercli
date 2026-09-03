@@ -78,6 +78,67 @@ func TestWriteMemoryOverwritesExistingStartupConfigFile(t *testing.T) {
 	}
 }
 
+// TestWriteAloneIsIncompleteAndDoesNotSave - This test verifies that
+// resolving bare "write", with no "memory" following it, against the
+// exact "write" and "write memory" shape var/tree/level_admin.yaml
+// declares never resolves to a runnable command, matching real Cisco
+// and HP, both of which require the full "write memory" before
+// anything is saved. A command.Command with no RunFunc of its own is
+// never RunnableAsIs, see runnableAsIs's own doc comment in
+// command/command.go, so this is the same generic property
+// TestResolveRunnableAsIsFalseForPureContainer in
+// command/command_test.go already establishes, checked again here
+// against the real, shipped shape "write" and "write memory" declare,
+// so a future change to level_admin.yaml that accidentally added a
+// "run:" directly onto "write" itself would be caught here.
+func TestWriteAloneIsIncompleteAndDoesNotSave(t *testing.T) {
+	tree := loadTestTree(t, `commands:
+  write:
+    subcommands:
+      memory:
+        run: write.memory
+`)
+	res := command.Resolve(tree, []string{"write"})
+
+	if res.RunnableAsIs {
+		t.Error("RunnableAsIs = true, want false: bare \"write\" must not run \"write memory\" on its own")
+	}
+	if res.Command == nil || res.Command.RunFunc != nil {
+		t.Error("expected bare \"write\" to resolve to a pure container with no RunFunc of its own")
+	}
+}
+
+// TestWriteMemoryResolvesToARunnableCommand - This test verifies that
+// "write memory", the full two word command, resolves to a runnable
+// command bound to the registered "write.memory" handler, against the
+// same tree shape as the test above.
+func TestWriteMemoryResolvesToARunnableCommand(t *testing.T) {
+	tree := loadTestTree(t, `commands:
+  write:
+    subcommands:
+      memory:
+        run: write.memory
+`)
+	res := command.Resolve(tree, []string{"write", "memory"})
+
+	if !res.RunnableAsIs {
+		t.Error("RunnableAsIs = false, want true: \"write memory\" is a complete command")
+	}
+	if res.Command == nil || res.Command.RunFunc == nil {
+		t.Fatal("expected \"write memory\" to resolve to a runnable command")
+	}
+
+	ctx := newTestContext()
+	ctx.Levels = &command.TreeStructure{}
+	ctx.StartupConfigFile = filepath.Join(t.TempDir(), "startup-config")
+	if err := res.Command.RunFunc(ctx, nil); err != nil {
+		t.Fatalf("write.memory handler returned unexpected error: %v", err)
+	}
+	if _, err := os.Stat(ctx.StartupConfigFile); err != nil {
+		t.Errorf("expected startup-config file to exist after \"write memory\", os.Stat returned: %v", err)
+	}
+}
+
 // TestEraseStartupConfigRemovesExistingFile - This test verifies that
 // "erase startup-config" deletes an existing file and reports the
 // "confirm" outcome, not the "nothing to erase" one.
@@ -362,6 +423,13 @@ func TestStartupConfigReplaysBaseAndUserAliasesWithNobodyLoggedIn(t *testing.T) 
 	// Deliberately nil: this is the whole point of the test, a cold
 	// boot replay has no session at all yet.
 	replayCtx.Session = nil
+	// rewireDaemonClient shares this exact TreeStructure with
+	// ctx.DaemonClient's own Store, so cmd/core's own "alias" handler,
+	// replayed below by way of this file's blank import of that
+	// package, reaches the same ctx.Levels this test asserts against
+	// afterward through its own ctx.DaemonClient.MutateLevels call. See
+	// rewireDaemonClient's own doc comment in testhelpers_test.go.
+	rewireDaemonClient(replayCtx)
 	if err := command.ReplayLines(replayCtx, lines, true); err != nil {
 		t.Fatalf("command.ReplayLines returned unexpected error with nobody logged in: %v", err)
 	}

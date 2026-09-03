@@ -29,6 +29,17 @@ commands:
         desc_key: show.terminal.desc
         pageable: true
         run: show.terminal
+      users:
+        desc_key: show.users.desc
+        pageable: true
+        # Every currently attached session, real daemon required, see
+        # cmd/core/cmd_show_users.go and
+        # claude/DAEMON_ARCHITECTURE_DESIGN.md's own "ListUsers"
+        # description. Pruned out of this level's own tree entirely
+        # for a deployment with no daemon configured, see main.go's
+        # own featureFlags.
+        requires: daemon
+        run: show.users
       version:
         desc_key: show.version.desc
         pageable: true

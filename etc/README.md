@@ -122,6 +122,16 @@ NOTE: Here are the four (4) use cases for the sorting of Commands in a Command L
  - `AlphabeticalCommandOrder` is `false` and `MergeCommonCommands` is `true` = This use case does not make sense, because you cannot merge the commands and yet keep them in the order they were listed in their YAML file. This combination results in a hard error at startup.
  - `AlphabeticalCommandOrder` is `false` and `MergeCommonCommands` is `false` = All the normal commands are listed first in the order they appear in the YAML file. Then the common commands are listed also in the order in which they appear in the YAML file.  
 
+### Daemon Settings
+
+#### `DaemonSocketPath`
+
+This is the Unix domain socket path a real `routercli-daemon` process listens on, and a `routercli` CLI process connects to, for state genuinely shared across every attached session, `ProductState`, the tree structure's own runtime defined aliases and level passwords, the user database, and the role set, rather than each session holding its own separate, driftable copy. The default is empty, meaning routercli runs exactly as it always has, standalone, one process per connection, its own state freshly loaded at boot, with no daemon involved at all. See `claude/DAEMON_ARCHITECTURE_DESIGN.md` for the full design.
+
+Set this only once a real `routercli-daemon` binary is actually running, built with `go build ./cmd/routercli-daemon` from the repository root, and pointed at the same path. The daemon holds one persisted static identity key pair, used to authenticate itself to a connecting client, generated automatically the first time it starts and written beside the socket path itself, `<DaemonSocketPath>.key`, kept private to the daemon, and `<DaemonSocketPath>.key.pub`, world readable, so a connecting CLI client can read it before it ever dials the socket. Neither key file needs a configuration entry of its own; both are always derived from `DaemonSocketPath`, see `daemon.StaticKeyPath`.
+
+A vendor building a new command that touches shared state, `ProductState`, the tree structure, the user database, or the role set, reaches that state through `command.AppContext.DaemonClient` rather than through a direct field access, so the same handler works correctly whether this deployment is running standalone or against a real daemon. See `cmd/product/doc.go`'s and `cmd/core/doc.go`'s own "Application State" sections for the full pattern and worked examples.
+
 ### Authentication Settings
 
 #### `AuthRequired`

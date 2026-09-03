@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gologme/log"
 )
@@ -25,6 +26,41 @@ func TestAuditLogDisabledByDefaultWritesNothing(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("expected no file to be created while disabled, got err=%v", err)
+	}
+}
+
+// TestAuditLogLogAtUsesTheGivenTimestampNotNow - This test verifies
+// that LogAt records when, the moment a real RouterCLI daemon's own
+// AuditEvent message says a session actually dispatched a command,
+// rather than time.Now, the later moment the daemon itself got around
+// to writing it. It also verifies LogAt follows Log's own "silently
+// does nothing while disabled" rule, checked first against a disabled
+// AuditLog before Enable ever runs.
+func TestAuditLogLogAtUsesTheGivenTimestampNotNow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	a := New(path, nil)
+
+	a.LogAt(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), "alice", "show version", true)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected no file to be created while disabled, got err=%v", err)
+	}
+
+	if err := a.Enable(); err != nil {
+		t.Fatalf("Enable returned error: %v", err)
+	}
+	when := time.Date(2020, 1, 1, 12, 30, 0, 0, time.UTC)
+	a.LogAt(when, "bob", "reboot", true)
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	want := FormatEntry(when, "bob", "reboot", true)
+	if string(got) != want {
+		t.Errorf("log file content = %q, want %q", string(got), want)
 	}
 }
 

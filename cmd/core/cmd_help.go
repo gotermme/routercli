@@ -47,22 +47,26 @@ import (
 // printing nothing silently, so a typo is visible as a typo.
 //
 // width, paging.EffectiveTerminalWidth's own live detection, the same
-// call terminalStatusLines in cmd_show.go already makes for "show
-// terminal", is resolved fresh on every call rather than cached, so a
-// mid session terminal resize is reflected the next time "help" runs,
-// and passed straight through to command.DetailedHelp, which wraps
-// its own NAME, SYNOPSIS, and DESCRIPTION text to it. "help" itself is
-// marked pageable in var/tree/level_common.yaml, so a detail block
-// longer than one screen pauses with the same "--More--" prompt every
-// other report style command already uses, rather than scrolling
-// straight past the top of the terminal.
+// call terminalStatusLines in cmd/session/cmd_show.go already makes for
+// "show terminal", is resolved fresh on every call rather than cached, so a
+// mid session terminal resize is reflected the next time "help" runs.
+// Typed with nothing after it, width goes to command.HelpText, which
+// wraps a long description onto an indented continuation line rather
+// than leaving it for the terminal itself to hard wrap at the left
+// margin. Typed with a command name after it, width goes to
+// command.DetailedHelp instead, which wraps its own NAME, SYNOPSIS, and
+// DESCRIPTION text to it. "help" itself is marked pageable in
+// var/tree/level_common.yaml, so a listing or detail block longer than
+// one screen pauses with the same "--More--" prompt every other report
+// style command already uses, rather than scrolling straight past the
+// top of the terminal.
 func init() {
 	command.Register("help", func(ctx *command.AppContext, args []string) error {
+		width := paging.EffectiveTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth, ctx.DefaultTerminalWidth)
 		if len(args) == 0 {
-			fmt.Print(command.HelpText(ctx.Position.Current().Tree, ctx.Translator, ctx.ListOptions))
+			fmt.Print(command.HelpText(ctx.Position.Current().Tree, ctx.Translator, ctx.ListOptions, width))
 			return nil
 		}
-		width := paging.EffectiveTerminalWidth(int(os.Stdin.Fd()), ctx.TerminalWidth, ctx.DefaultTerminalWidth)
 		text := command.DetailedHelp(ctx.Position.Current().Tree, args, ctx.Translator, ctx.ListOptions, ctx.ProductName, width)
 		if text == "" {
 			return fmt.Errorf("%s", ctx.Translator.T("help.unknown_command", strings.Join(args, " ")))

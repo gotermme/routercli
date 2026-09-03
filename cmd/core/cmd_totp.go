@@ -283,6 +283,12 @@ func clearScreen(w io.Writer) {
 // "write memory" separately, see design-goals.md's own core design
 // goal on this. A process that reloads or restarts before that
 // happens goes right back to TOTP being disabled for this account.
+// This write reaches the user database through
+// ctx.DaemonClient.MutateUsers rather than mutating the user pointer
+// this function was handed directly, re-resolving it from the
+// closure's own users parameter by ctx.Session.Username, the same
+// discipline cmd_hostname.go's own "hostname" handler already
+// follows.
 //
 // The returned bool tells the caller whether enrollment actually
 // completed, the same reason auth.VerifyLogin returns a bool
@@ -295,7 +301,12 @@ func finishTOTPEnable(ctx *command.AppContext, user *auth.User, secret, code str
 		return false, nil
 	}
 
-	user.TOTPSecret = secret
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		users[ctx.Session.Username].TOTPSecret = secret
+		return nil, nil
+	}); err != nil {
+		return false, err
+	}
 	// This only ever changes user.TOTPSecret, in memory, never
 	// ctx.UsersFile on disk. See design-goals.md's own "nothing
 	// survives a restart without an explicit save" core design goal: a
@@ -316,7 +327,9 @@ func finishTOTPEnable(ctx *command.AppContext, user *auth.User, secret, code str
 // unlocked session should not be able to do unchallenged.
 //
 // On success, user.TOTPSecret is cleared, in memory only, the same
-// reasoning finishTOTPEnable's own doc comment gives, in reverse.
+// reasoning finishTOTPEnable's own doc comment gives, in reverse,
+// including reaching the user database through
+// ctx.DaemonClient.MutateUsers the same way.
 //
 // The returned bool tells the caller, the registered "totp.disable"
 // handler, whether the account is now actually disabled, so it knows
@@ -328,7 +341,12 @@ func finishTOTPDisable(ctx *command.AppContext, user *auth.User, password, code 
 		return false, nil
 	}
 
-	user.TOTPSecret = ""
+	if _, err := ctx.DaemonClient.MutateUsers(func(users auth.Users) (any, error) {
+		users[ctx.Session.Username].TOTPSecret = ""
+		return nil, nil
+	}); err != nil {
+		return false, err
+	}
 	// This only ever changes user.TOTPSecret, in memory, never
 	// ctx.UsersFile on disk. See finishTOTPEnable's own comment right
 	// above for the same reasoning, in reverse: a reload or restart

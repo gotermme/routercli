@@ -65,6 +65,48 @@ func TestSetPromptUpdatesCurrentPrompt(t *testing.T) {
 	}
 }
 
+// TestSetTerminalWidthStoresAllThreeArguments - This test verifies
+// that SetTerminalWidth records fd, override, and fallback exactly as
+// given, onto terminalFD, terminalWidthOverride, and
+// defaultTerminalWidth respectively, the same fd, override, and
+// fallback parameter shape paging.EffectiveTerminalWidth itself takes,
+// see this method's own doc comment. New leaves terminalFD at its own
+// -1 default until main.go calls this method once, right alongside
+// SetPrompt; every other test in this package relies on that -1
+// default staying in place because it never calls SetTerminalWidth at
+// all, so this test is the only one confirming the method actually
+// takes effect when it is called.
+func TestSetTerminalWidthStoresAllThreeArguments(t *testing.T) {
+	l := &TreeListener{}
+	override := intPtr(120)
+
+	l.SetTerminalWidth(3, override, 80)
+
+	if l.terminalFD != 3 {
+		t.Errorf("terminalFD = %d, want 3", l.terminalFD)
+	}
+	if l.terminalWidthOverride != override {
+		t.Errorf("terminalWidthOverride = %v, want the exact pointer passed in (%v)", l.terminalWidthOverride, override)
+	}
+	if l.defaultTerminalWidth != 80 {
+		t.Errorf("defaultTerminalWidth = %d, want 80", l.defaultTerminalWidth)
+	}
+}
+
+// TestSetTerminalWidthNilOverrideIsStoredAsNil - This test verifies
+// that a nil override, meaning no configured override width at all,
+// the ordinary case for a deployment that never sets one, is stored
+// as nil rather than replaced with some other zero value, so
+// paging.EffectiveTerminalWidth's own nil check still behaves
+// correctly afterward.
+func TestSetTerminalWidthNilOverrideIsStoredAsNil(t *testing.T) {
+	l := &TreeListener{}
+	l.SetTerminalWidth(-1, nil, 80)
+	if l.terminalWidthOverride != nil {
+		t.Errorf("terminalWidthOverride = %v, want nil", l.terminalWidthOverride)
+	}
+}
+
 // testLogger - This function returns a *log.Logger that discards output. OnChange
 // calls Debugln unconditionally, so any test constructing a
 // TreeListener directly, bypassing New, needs a non-nil logger or it

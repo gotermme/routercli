@@ -17,22 +17,33 @@ import (
 // rather than being a separate registration. command.Resolve
 // understands "no" as a modifier on an existing command, so one
 // registration covers both directions.
+//
+// This handler reaches ProductState through
+// ctx.DaemonClient.MutateProductState rather than a direct type
+// assertion on ctx.State, following cmd_hostname.go's own "hostname"
+// handler; see that file's own doc comment for the full reasoning.
+// ifaceName itself, read from ctx.Position, is session-local, not
+// shared state, so it is resolved once, outside the closure.
 func init() {
 	command.Register("interface.shutdown", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
 		ifaceName := ctx.Position.Current().Context.(string)
-		iface := state.Interface(ifaceName)
 
-		if ctx.Negated {
-			iface.Shutdown = false
-			ctx.Logger.Debugln("DEBUG: interface administratively enabled", ifaceName)
-			fmt.Println(ctx.Translator.T("no_shutdown.confirm"))
-			return nil
-		}
+		_, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+			state := productState.(*ProductState)
+			iface := state.Interface(ifaceName)
 
-		iface.Shutdown = true
-		ctx.Logger.Debugln("DEBUG: interface administratively shut down", ifaceName)
-		fmt.Println(ctx.Translator.T("shutdown.confirm"))
-		return nil
+			if ctx.Negated {
+				iface.Shutdown = false
+				ctx.Logger.Debugln("DEBUG: interface administratively enabled", ifaceName)
+				fmt.Println(ctx.Translator.T("no_shutdown.confirm"))
+				return nil, nil
+			}
+
+			iface.Shutdown = true
+			ctx.Logger.Debugln("DEBUG: interface administratively shut down", ifaceName)
+			fmt.Println(ctx.Translator.T("shutdown.confirm"))
+			return nil, nil
+		})
+		return err
 	})
 }

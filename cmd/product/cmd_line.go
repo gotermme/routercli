@@ -63,6 +63,16 @@ const (
 // process, not only after a future restart replays it back in. "line
 // paging" and "no line paging" work the same way for
 // state.Line.Paging and ctx.PagingEnabled.
+//
+// state.Line.Length, state.Line.Width, and state.Line.Paging, being
+// ProductState, are reached through
+// ctx.DaemonClient.MutateProductState rather than a direct type
+// assertion on ctx.State, following cmd_hostname.go's own "hostname"
+// handler; see that file's own doc comment for the full reasoning.
+// ctx.DefaultPageLines, ctx.DefaultTerminalWidth, and
+// ctx.PagingEnabled are session-local AppContext fields, not shared
+// state, so they stay direct assignments, applied right after the
+// mutation succeeds.
 func init() {
 	command.Register("line", func(ctx *command.AppContext, args []string) error {
 		level := ctx.Levels.ByName["config-line"]
@@ -79,12 +89,17 @@ func init() {
 	})
 
 	command.Register("line.length", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
 		n, err := parseLineGeometry(ctx, args[0], lineLengthMin, lineLengthMax)
 		if err != nil {
 			return err
 		}
-		state.Line.Length = &n
+		if _, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+			state := productState.(*ProductState)
+			state.Line.Length = &n
+			return nil, nil
+		}); err != nil {
+			return err
+		}
 		ctx.DefaultPageLines = n
 		ctx.Logger.Debugln("DEBUG: line length default set to", n)
 		fmt.Println(ctx.Translator.T("line.length.confirm", n))
@@ -92,12 +107,17 @@ func init() {
 	})
 
 	command.Register("line.width", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
 		n, err := parseLineGeometry(ctx, args[0], lineWidthMin, lineWidthMax)
 		if err != nil {
 			return err
 		}
-		state.Line.Width = &n
+		if _, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+			state := productState.(*ProductState)
+			state.Line.Width = &n
+			return nil, nil
+		}); err != nil {
+			return err
+		}
 		ctx.DefaultTerminalWidth = n
 		ctx.Logger.Debugln("DEBUG: line width default set to", n)
 		fmt.Println(ctx.Translator.T("line.width.confirm", n))
@@ -105,9 +125,14 @@ func init() {
 	})
 
 	command.Register("line.paging", func(ctx *command.AppContext, args []string) error {
-		state := ctx.State.(*ProductState)
 		enabled := !ctx.Negated
-		state.Line.Paging = &enabled
+		if _, err := ctx.DaemonClient.MutateProductState(func(productState any) (any, error) {
+			state := productState.(*ProductState)
+			state.Line.Paging = &enabled
+			return nil, nil
+		}); err != nil {
+			return err
+		}
 		ctx.PagingEnabled = enabled
 		ctx.Logger.Debugln("DEBUG: line paging default set to", enabled)
 		if enabled {
@@ -121,9 +146,9 @@ func init() {
 
 // parseLineGeometry - This function is shared by "line length" and
 // "line width", the same small parse and range check logic
-// cmd/core/cmd_terminal.go's own parseTerminalGeometry already
+// cmd/session/cmd_terminal.go's own parseTerminalGeometry already
 // performs for "terminal length" and "terminal width", duplicated
-// here rather than imported since cmd/core and cmd/product stay
+// here rather than imported since cmd/product and cmd/session stay
 // independent siblings, see this file's own doc comment. The error
 // messages reuse cmd/core's own "terminal.not_a_number" and
 // "terminal.out_of_range" catalog keys directly: both are already

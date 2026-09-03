@@ -77,6 +77,20 @@ import (
 // command.LoadStartupConfig's own doc comment, so replay must be free
 // to restate an alias already present without being refused as a
 // collision with itself.
+//
+// Every read below, the unknown level check, the reserved word and
+// command collision checks, and the already-defined check, stays a
+// direct read off ctx.Levels, the same as every other framework-level
+// Levels lookup in this project; command.DaemonClient exposes only
+// Mutate methods, no Read method of any kind, evidence that reads were
+// never meant to route through it. Only the actual write, the delete
+// or the new alias assignment, runs inside
+// ctx.DaemonClient.MutateLevels, and, once inside that closure,
+// re-resolves level from the closure's own levels parameter rather
+// than reusing the level pointer read above, the same discipline
+// cmd_hostname.go's own "hostname" handler already follows: a real,
+// remote daemon implementation would hand this closure a freshly
+// fetched copy each call, not the pointer read before the call began.
 func init() {
 	command.Register("alias", func(ctx *command.AppContext, args []string) error {
 		currentName := ctx.Position.Current().Name
@@ -97,7 +111,13 @@ func init() {
 			if _, defined := level.Aliases[aliasName]; !defined {
 				return fmt.Errorf("%s", ctx.Translator.T("alias.not_defined", aliasName, currentName))
 			}
-			delete(level.Aliases, aliasName)
+			_, err := ctx.DaemonClient.MutateLevels(func(levels *command.TreeStructure) (any, error) {
+				delete(levels.ByName[currentName].Aliases, aliasName)
+				return nil, nil
+			})
+			if err != nil {
+				return err
+			}
 			ctx.Logger.Debugln("DEBUG: alias removed:", aliasName, "from level", currentName)
 			fmt.Println(ctx.Translator.T("alias.removed", aliasName, currentName))
 			return nil
@@ -130,10 +150,17 @@ func init() {
 			return fmt.Errorf("%s", ctx.Translator.T("alias.already_defined", aliasName, currentName, "no alias "+aliasName))
 		}
 
-		if level.Aliases == nil {
-			level.Aliases = make(map[string][]string)
+		_, err := ctx.DaemonClient.MutateLevels(func(levels *command.TreeStructure) (any, error) {
+			target := levels.ByName[currentName]
+			if target.Aliases == nil {
+				target.Aliases = make(map[string][]string)
+			}
+			target.Aliases[aliasName] = expansion
+			return nil, nil
+		})
+		if err != nil {
+			return err
 		}
-		level.Aliases[aliasName] = expansion
 		ctx.Logger.Debugln("DEBUG: alias defined:", aliasName, "->", strings.Join(expansion, " "), "for level", currentName)
 		fmt.Println(ctx.Translator.T("alias.confirm", aliasName, currentName, strings.Join(expansion, " ")))
 		return nil

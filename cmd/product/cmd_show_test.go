@@ -14,6 +14,7 @@ import (
 
 	"github.com/gotermme/routercli/auth"
 	_ "github.com/gotermme/routercli/cmd/core"
+	_ "github.com/gotermme/routercli/cmd/session"
 	"github.com/gotermme/routercli/command"
 	"github.com/gotermme/routercli/i18n"
 	"github.com/gotermme/routercli/tokenize"
@@ -350,6 +351,13 @@ func TestShowRunningConfigOutputReplaysBackToTheSameState(t *testing.T) {
 	replayCtx := newTestContext()
 	replayCtx.Levels = levels
 	replayCtx.Position = command.NewCommandLevelStack("exec", "", levels.ByName["exec"].Tree)
+	// rewireDaemonClient shares this exact TreeStructure with
+	// ctx.DaemonClient's own Store, so cmd/core's own "alias" handler,
+	// replayed below by way of this file's blank import of that
+	// package, reaches the same ctx.Levels this test asserts against
+	// afterward through its own ctx.DaemonClient.MutateLevels call. See
+	// rewireDaemonClient's own doc comment in testhelpers_test.go.
+	rewireDaemonClient(replayCtx)
 	// Clear every level's own Aliases map first, so this replay proves
 	// the rendered text alone reconstructs them, not that they were
 	// simply left over from ctx and replayCtx sharing the same

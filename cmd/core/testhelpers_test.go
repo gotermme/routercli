@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/gologme/log"
+	"github.com/gotermme/routercli/auth"
 	"github.com/gotermme/routercli/command"
+	"github.com/gotermme/routercli/daemon"
 )
 
 // newTestContext - This function builds a minimal *command.AppContext
@@ -25,6 +27,18 @@ import (
 // handler tests can copy this same pattern, setting State to whatever
 // their own project actually needs.
 //
+// DaemonClient is a plain daemon.NewStandaloneClient, no daemon
+// configured, the same default main.go itself falls back to whenever
+// config.SystemConfig.DaemonSocketPath is empty; every one of its
+// ListUsers, DisconnectUser, and Reboot methods returns
+// command.ErrDaemonNotConfigured, matching a real standalone
+// deployment exactly, so a handler that already branches on that
+// error, runReboot in cmd_admin.go for instance, exercises its own
+// standalone path by default here with no special test setup of its
+// own needed. A test exercising the daemon-configured path builds its
+// own fakeDaemonClient instead, see testhelpers_test.go's own
+// fakeDaemonClient, and assigns it to ctx.DaemonClient directly.
+//
 // This is deliberately the same shape as cmd/product's own
 // newTestContext, one independent copy per package rather than a
 // shared export, since the two disagree on what State should hold and
@@ -33,8 +47,33 @@ import (
 // is built around.
 func newTestContext() *command.AppContext {
 	return &command.AppContext{
-		Logger: log.New(io.Discard, "", 0),
+		DaemonClient: daemon.NewStandaloneClient(daemon.NewState(nil, nil, nil, nil, nil)),
+		Logger:       log.New(io.Discard, "", 0),
 	}
+}
+
+// rewireDaemonClient - This function replaces ctx.DaemonClient with a
+// fresh daemon.NewStandaloneClient whose own Store shares the exact
+// same ctx.State, ctx.Levels, ctx.Users, and ctx.Roles a test has
+// already assigned, rather than the disconnected, entirely separate
+// copy newTestContext's own plain daemon.NewStandaloneClient started
+// out holding, daemon.NewState(nil, nil, nil, nil, nil). Several
+// handlers in this package, cmd_admin.go's account management
+// commands, cmd_password.go's finishPasswordChange, cmd_totp.go's
+// finishTOTPEnable and finishTOTPDisable, cmd_alias.go's "alias", and
+// cmd_password_manager.go's "password manager" among them, now reach
+// shared state exclusively through ctx.DaemonClient.MutateUsers or
+// MutateLevels, never through ctx.Users or ctx.Levels directly. A test
+// exercising one of those handlers must call this, after assigning
+// the real Users, Levels, or both, a test cares about, so that
+// closure sees the same map or struct the test itself asserts against
+// afterward, rather than a nil or empty one of the Store's own. See
+// cmd_hostname.go's own doc comment, in cmd/product, for the migration
+// this follows, and cmd/product's own testhelpers_test.go, whose
+// newTestContext already wires State and DaemonClient together from
+// construction, for the equivalent already in place there.
+func rewireDaemonClient(ctx *command.AppContext) {
+	ctx.DaemonClient = daemon.NewStandaloneClient(daemon.NewState(ctx.State, ctx.Levels, ctx.Users, ctx.Roles, nil))
 }
 
 // loadTestCommand - This function resolves handlerName into its
@@ -59,4 +98,77 @@ func loadTestCommand(t *testing.T, handlerName string) *command.Command {
 		t.Fatalf("LoadTree returned error: %v", err)
 	}
 	return tree["test"]
+}
+
+// fakeDaemonClient is a command.DaemonClient test double a test builds
+// directly, sets whichever of its four exported *Err or *Result
+// fields it cares about, and assigns to ctx.DaemonClient in place of
+// the plain daemon.NewStandaloneClient newTestContext already
+// provides, to exercise a handler's own daemon-configured path, one
+// where a real daemon is answering rather than
+// command.ErrDaemonNotConfigured. The three Mutate methods are left
+// unimplemented, panicking if called, since nothing in this package's
+// own tests today reaches them through a fakeDaemonClient; a future
+// test that needs one adds it then, rather than this type guessing at
+// a shape nothing yet exercises.
+type fakeDaemonClient struct {
+	// RebootErr is returned by Reboot; RebootCalls counts how many
+	// times it was called, so a test can confirm a handler asked the
+	// daemon to reboot without also asserting on a session-ending
+	// side effect that only a real daemon connection ever produces.
+	RebootErr   error
+	RebootCalls int
+
+	// ListUsersResult and ListUsersErr are returned by ListUsers
+	// together, in that order.
+	ListUsersResult []command.SessionInfo
+	ListUsersErr    error
+
+	// DisconnectUserErr is returned by DisconnectUser.
+	// DisconnectUserUsername and DisconnectUserSessionID record its
+	// two arguments from the most recent call, so a test can confirm
+	// exactly what a handler asked the daemon to disconnect.
+	DisconnectUserErr       error
+	DisconnectUserUsername  string
+	DisconnectUserSessionID string
+
+	// FarewellCh is returned by FarewellChannel as is, nil by default,
+	// the same "not wired up" convention a real StandaloneClient
+	// already follows.
+	FarewellCh chan string
+}
+
+func (f *fakeDaemonClient) MutateProductState(fn func(any) (any, error)) (any, error) {
+	panic("fakeDaemonClient: MutateProductState not implemented, no test needs it yet")
+}
+
+func (f *fakeDaemonClient) MutateLevels(fn func(*command.TreeStructure) (any, error)) (any, error) {
+	panic("fakeDaemonClient: MutateLevels not implemented, no test needs it yet")
+}
+
+func (f *fakeDaemonClient) MutateUsers(fn func(auth.Users) (any, error)) (any, error) {
+	panic("fakeDaemonClient: MutateUsers not implemented, no test needs it yet")
+}
+
+func (f *fakeDaemonClient) MutateRoles(fn func(*command.RoleSet) (any, error)) (any, error) {
+	panic("fakeDaemonClient: MutateRoles not implemented, no test needs it yet")
+}
+
+func (f *fakeDaemonClient) ListUsers() ([]command.SessionInfo, error) {
+	return f.ListUsersResult, f.ListUsersErr
+}
+
+func (f *fakeDaemonClient) DisconnectUser(username, sessionID string) error {
+	f.DisconnectUserUsername = username
+	f.DisconnectUserSessionID = sessionID
+	return f.DisconnectUserErr
+}
+
+func (f *fakeDaemonClient) Reboot() error {
+	f.RebootCalls++
+	return f.RebootErr
+}
+
+func (f *fakeDaemonClient) FarewellChannel() <-chan string {
+	return f.FarewellCh
 }

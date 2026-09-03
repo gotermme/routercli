@@ -31,7 +31,7 @@ func TestHelpTextOneLevelOnly(t *testing.T) {
 		"exit": {Desc: "Exit the CLI", RunFunc: func(*AppContext, []string) error { return nil }},
 	}
 
-	text := HelpText(tree, nil, DefaultListOptions())
+	text := HelpText(tree, nil, DefaultListOptions(), 0)
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 
 	if !strings.Contains(text, "show") || !strings.Contains(text, "Show things") {
@@ -61,7 +61,7 @@ func TestHelpTextExcludesHiddenAtTopLevel(t *testing.T) {
 		"\"?\"": {Desc: "Display available commands", Alias: "help", Hidden: true},
 	}
 
-	text := HelpText(tree, nil, DefaultListOptions())
+	text := HelpText(tree, nil, DefaultListOptions(), 0)
 	if !strings.Contains(text, "help") || !strings.Contains(text, "exit") {
 		t.Errorf("expected help text to include \"help\" and \"exit\", got:\n%s", text)
 	}
@@ -73,9 +73,64 @@ func TestHelpTextExcludesHiddenAtTopLevel(t *testing.T) {
 // TestHelpTextEmptyTree - This test verifies that an empty command tree still
 // produces the header line, rather than an empty string.
 func TestHelpTextEmptyTree(t *testing.T) {
-	text := HelpText(map[string]*Command{}, nil, DefaultListOptions())
+	text := HelpText(map[string]*Command{}, nil, DefaultListOptions(), 0)
 	if !strings.Contains(text, "Available commands:") {
 		t.Errorf("expected a header even for an empty tree, got:\n%s", text)
+	}
+}
+
+// TestHelpTextWrapsLongDescriptionWithHangingIndent - This test
+// verifies that a description too long to fit next to its own command
+// name within width continues on the next line, indented to line up
+// under the description column, rather than left for a real terminal
+// to hard wrap back at the left margin. The command name itself,
+// "show", is never broken across lines, only the description that
+// follows it.
+func TestHelpTextWrapsLongDescriptionWithHangingIndent(t *testing.T) {
+	tree := map[string]*Command{
+		"show": {
+			Desc:    "Display running system information, including the version, the configuration, and every interface",
+			RunFunc: func(*AppContext, []string) error { return nil },
+		},
+	}
+
+	text := HelpText(tree, nil, DefaultListOptions(), 40)
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+
+	if len(lines) < 3 {
+		t.Fatalf("expected the long description to wrap onto more than one line, got %d lines:\n%s", len(lines), text)
+	}
+	if !strings.HasPrefix(lines[1], "  show  ") {
+		t.Errorf("expected the first description line to start with the padded command name, got %q", lines[1])
+	}
+	wantIndent := strings.Repeat(" ", 2+len("show")+2)
+	for _, line := range lines[2:] {
+		if !strings.HasPrefix(line, wantIndent) {
+			t.Errorf("continuation line %q does not start with the description column's own indent %q", line, wantIndent)
+		}
+		if strings.HasPrefix(line, wantIndent+" ") {
+			t.Errorf("continuation line %q is indented further than the description column itself", line)
+		}
+	}
+	for _, line := range lines[1:] {
+		if len(line) > 40 {
+			t.Errorf("line %q is %d columns wide, want at most 40", line, len(line))
+		}
+	}
+}
+
+// TestHelpTextShortDescriptionsStayOnOneLineRegardlessOfWidth - This
+// test verifies that a description that already fits stays on its own
+// single line, unaffected by width, the same output this listing has
+// always produced for the common case.
+func TestHelpTextShortDescriptionsStayOnOneLineRegardlessOfWidth(t *testing.T) {
+	tree := map[string]*Command{
+		"exit": {Desc: "Exit the CLI", RunFunc: func(*AppContext, []string) error { return nil }},
+	}
+
+	text := HelpText(tree, nil, DefaultListOptions(), 80)
+	if !strings.Contains(text, "  exit  Exit the CLI\n") {
+		t.Errorf("expected the short description to stay on one line, got:\n%s", text)
 	}
 }
 
@@ -117,7 +172,7 @@ func helpForPathTestTree() map[string]*Command {
 // the bare names only "word help" form.
 func TestHelpForPathContainerListsSubcommandsWithDescriptions(t *testing.T) {
 	tree := helpForPathTestTree()
-	got := HelpForPath(tree, []string{"show", ""}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"show", ""}, nil, DefaultListOptions(), 0)
 
 	for _, want := range []string{"version", "running-config", "startup-config", "Show version"} {
 		if !strings.Contains(got, want) {
@@ -131,7 +186,7 @@ func TestHelpForPathContainerListsSubcommandsWithDescriptions(t *testing.T) {
 // every top-level command name.
 func TestHelpForPathBarePromptListsTopLevelNames(t *testing.T) {
 	tree := helpForPathTestTree()
-	got := HelpForPath(tree, nil, nil, DefaultListOptions())
+	got := HelpForPath(tree, nil, nil, DefaultListOptions(), 0)
 
 	for _, want := range []string{"show", "terminal"} {
 		if !strings.Contains(got, want) {
@@ -147,7 +202,7 @@ func TestHelpForPathBarePromptListsTopLevelNames(t *testing.T) {
 // neither of those forms should appear instead.
 func TestHelpForPathLeafWithArgumentShowsArgHelpHint(t *testing.T) {
 	tree := helpForPathTestTree()
-	got := HelpForPath(tree, []string{"terminal", "length", ""}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"terminal", "length", ""}, nil, DefaultListOptions(), 0)
 
 	if !strings.Contains(got, "<2-1000>") {
 		t.Errorf("HelpForPath(terminal length ?) = %q, expected the ArgHelp hint", got)
@@ -160,7 +215,7 @@ func TestHelpForPathLeafWithArgumentShowsArgHelpHint(t *testing.T) {
 // nothing rather than guessing at an error message.
 func TestHelpForPathUnknownPathReturnsEmpty(t *testing.T) {
 	tree := helpForPathTestTree()
-	got := HelpForPath(tree, []string{"bogus"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"bogus"}, nil, DefaultListOptions(), 0)
 	if got != "" {
 		t.Errorf("HelpForPath(bogus ?) = %q, want empty string", got)
 	}
@@ -175,7 +230,7 @@ func TestHelpForPathLeafWithNoArgumentShowsCRHint(t *testing.T) {
 	tree := map[string]*Command{
 		"exit": {Desc: "Exit the CLI", RunFunc: func(*AppContext, []string) error { return nil }},
 	}
-	got := HelpForPath(tree, []string{"exit"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"exit"}, nil, DefaultListOptions(), 0)
 	if got != " <cr>\n" {
 		t.Errorf("HelpForPath(exit ?) = %q, want %q", got, " <cr>\n")
 	}
@@ -190,7 +245,7 @@ func TestHelpForPathLeafWithNoArgumentShowsCRHint(t *testing.T) {
 // instead of the full, described listing.
 func TestHelpForPathNegatedAmbiguousEmptyTokenShowsFullHelp(t *testing.T) {
 	tree := helpForPathTestTree()
-	got := HelpForPath(tree, []string{"no", "show", ""}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"no", "show", ""}, nil, DefaultListOptions(), 0)
 
 	for _, want := range []string{"version", "running-config", "startup-config", "Show version"} {
 		if !strings.Contains(got, want) {
@@ -210,7 +265,7 @@ func TestHelpForPathNegatedAmbiguousPartialWordListsPlainNames(t *testing.T) {
 		"show": {Desc: "Show things", Negatable: true, RunFunc: func(*AppContext, []string) error { return nil }},
 		"set":  {Desc: "Set things", Negatable: true, RunFunc: func(*AppContext, []string) error { return nil }},
 	}
-	got := HelpForPath(tree, []string{"no", "s"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"no", "s"}, nil, DefaultListOptions(), 0)
 
 	if !strings.Contains(got, "show") || !strings.Contains(got, "set") {
 		t.Errorf("HelpForPath(no s?) = %q, expected both \"show\" and \"set\" listed", got)
@@ -230,7 +285,7 @@ func TestHelpForPathAmbiguousListsPlainNames(t *testing.T) {
 		"show": {Desc: "Show things", RunFunc: func(*AppContext, []string) error { return nil }},
 		"set":  {Desc: "Set things", RunFunc: func(*AppContext, []string) error { return nil }},
 	}
-	got := HelpForPath(tree, []string{"s"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"s"}, nil, DefaultListOptions(), 0)
 
 	if !strings.Contains(got, "show") || !strings.Contains(got, "set") {
 		t.Errorf("HelpForPath(s?) = %q, expected both \"show\" and \"set\" listed", got)
@@ -281,7 +336,7 @@ func crTestTree() map[string]*Command {
 // it. "<cr>" must come after "qr", never sorted in among the real
 // names.
 func TestHelpForPathAmbiguousRunnableAsIsAppendsCR(t *testing.T) {
-	got := HelpForPath(crTestTree(), []string{"totp", "enable", ""}, nil, DefaultListOptions())
+	got := HelpForPath(crTestTree(), []string{"totp", "enable", ""}, nil, DefaultListOptions(), 0)
 
 	wantOrder := []string{"qr", "<cr>"}
 	for i, want := range wantOrder {
@@ -303,12 +358,12 @@ func TestHelpForPathAmbiguousRunnableAsIsAppendsCR(t *testing.T) {
 func TestHelpForPathContainerRunnableAsIsAppendsCR(t *testing.T) {
 	tree := crTestTree()
 
-	gotTotp := HelpForPath(tree, []string{"totp", ""}, nil, DefaultListOptions())
+	gotTotp := HelpForPath(tree, []string{"totp", ""}, nil, DefaultListOptions(), 0)
 	if strings.Contains(gotTotp, "<cr>") {
 		t.Errorf("HelpForPath(totp ?) = %q, expected no <cr>: \"totp\" itself is not runnable", gotTotp)
 	}
 
-	gotEnable := HelpForPath(tree, []string{"totp", "enable", ""}, nil, DefaultListOptions())
+	gotEnable := HelpForPath(tree, []string{"totp", "enable", ""}, nil, DefaultListOptions(), 0)
 	if !strings.Contains(gotEnable, "<cr>") {
 		t.Errorf("HelpForPath(totp enable ?) = %q, expected <cr>: \"enable\" is itself runnable", gotEnable)
 	}
@@ -324,7 +379,7 @@ func TestHelpForPathLeafWithUnsatisfiedMinArgsAndNoArgHelpReturnsEmpty(t *testin
 	tree := map[string]*Command{
 		"secret": {RunFunc: func(*AppContext, []string) error { return nil }, MinArgs: intPtr(1)},
 	}
-	got := HelpForPath(tree, []string{"secret"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"secret"}, nil, DefaultListOptions(), 0)
 	if got != "" {
 		t.Errorf("HelpForPath(secret ?) = %q, want empty string, not a misleading <cr>", got)
 	}
@@ -343,7 +398,7 @@ func TestHelpForPathLeafWithOptionalArgumentShowsHintAndCR(t *testing.T) {
 			ArgHelp: "<host>  Optional destination to trace",
 		},
 	}
-	got := HelpForPath(tree, []string{"traceroute"}, nil, DefaultListOptions())
+	got := HelpForPath(tree, []string{"traceroute"}, nil, DefaultListOptions(), 0)
 
 	if !strings.Contains(got, "<host>") || !strings.Contains(got, "<cr>") {
 		t.Errorf("HelpForPath(traceroute ?) = %q, expected both the ArgHelp hint and <cr>", got)
