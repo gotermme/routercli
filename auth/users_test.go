@@ -126,31 +126,40 @@ users:
 }
 
 // TestShippedUsersFileHasWorkingTestAccounts - This test verifies
-// that the shipped etc/users.yaml really has two working test
-// accounts, user1 and user2, both with the password "test1234".
-// Unlike the tests above, which use throwaway inline fixtures, this
-// one deliberately loads the real shipped etc/users.yaml. The
+// that the shipped etc/users.yaml really has a working seeded
+// bootstrap account, admin, with the password "testpass123". Unlike
+// the tests above, which use throwaway inline fixtures, this one
+// deliberately loads the real shipped etc/users.yaml. The
 // fixture-based tests only prove that LoadUsers works correctly
 // against arbitrary YAML, not that the actual file this project ships
 // still has correct hashes in it. A bcrypt hash is opaque by design.
 // A typo made while hand-editing the hash string would produce a
 // users.yaml that looks fine, loading without error and in the right
-// shape, but silently locks both accounts out, and nothing except
+// shape, but silently locks the account out, and nothing except
 // actually verifying the password against the hash would catch that.
+//
+// This test originally checked for two separate accounts, user1 and
+// user2, both with the password "test1234", predating the single
+// seeded `admin` bootstrap account this project settled on once
+// centralized AAA and role based access landed; see PROGRESS.md's own
+// Phase 30 entry. etc/users.yaml itself was updated to that single
+// account well before this test was, leaving this test checking for
+// accounts the shipped file had already stopped defining; every
+// interactive check in this project has logged in as admin with this
+// same password for a long time, confirming which side was actually
+// out of date.
 func TestShippedUsersFileHasWorkingTestAccounts(t *testing.T) {
 	users, err := LoadUsers(filepath.Join("..", "etc", "users.yaml"))
 	if err != nil {
 		t.Fatalf("failed to load the shipped etc/users.yaml: %v", err)
 	}
 
-	for _, name := range []string{"user1", "user2"} {
-		u, ok := users[name]
-		if !ok {
-			t.Fatalf("expected %s to be defined in etc/users.yaml", name)
-		}
-		if !VerifyPassword(u.PasswordHash, "test1234") {
-			t.Errorf("%s's password should verify against \"test1234\"", name)
-		}
+	u, ok := users["admin"]
+	if !ok {
+		t.Fatal("expected admin to be defined in etc/users.yaml")
+	}
+	if !VerifyPassword(u.PasswordHash, "testpass123") {
+		t.Error("admin's password should verify against \"testpass123\"")
 	}
 }
 
